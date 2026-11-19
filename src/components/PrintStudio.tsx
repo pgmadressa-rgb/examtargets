@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { ExternalLink, Printer, QrCode, UserCheck } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Calendar, Check, ExternalLink, Printer, QrCode, UserCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   formatOrdinalDate,
@@ -8,19 +8,29 @@ import {
   isMeaningful,
   normalizeTeacherKey,
 } from '../shared/planEngine.ts';
-import type { ClassPlan, RevisionTask, StudentTracker } from '../shared/types.ts';
+import type { ClassPlan, DateRange, RevisionTask, StudentTracker } from '../shared/types.ts';
 import { createOrGetStudentTracker } from './ApiClient.ts';
 import { TeacherClassSelector } from './TeacherClassSelector.tsx';
 
 interface PrintStudioProps {
   plans: ClassPlan[];
   activeTermName: string;
+  globalDateRange: DateRange;
   selectedPlanId: string;
   onSelectPlanId: (id: string) => void;
   includeWeekends: boolean;
   onToggleWeekends: (next: boolean) => void;
   onOpenQrPreview: (slug: string, trackerId?: string) => void;
   onTrackerCreated: () => Promise<void>;
+  onSavePlan: (
+    id: string,
+    payload: Partial<ClassPlan> & { regenerateFromTeacherInput?: boolean }
+  ) => Promise<void>;
+  onUpdateGlobalDateRange: (
+    startDate: string,
+    endDate: string,
+    overwriteManual: boolean
+  ) => Promise<void>;
 }
 
 interface SheetItem {
@@ -136,12 +146,15 @@ const ROW_TINT_CONFIG: Record<
 export const PrintStudio: React.FC<PrintStudioProps> = ({
   plans,
   activeTermName,
+  globalDateRange,
   selectedPlanId,
   onSelectPlanId,
   includeWeekends,
   onToggleWeekends,
   onOpenQrPreview,
   onTrackerCreated,
+  onSavePlan,
+  onUpdateGlobalDateRange,
 }) => {
   const [scope, setScope] = useState<PrintScope>('single');
   const [sheetStyle, setSheetStyle] = useState<SheetStyle>('minimal');
@@ -157,6 +170,21 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
     [plans, selectedPlanId]
   );
 
+  const [teacherNameDraft, setTeacherNameDraft] = useState(selectedPlan?.teacherName ?? '');
+  const [classNameDraft, setClassNameDraft] = useState(selectedPlan?.className ?? '');
+  const [startInput, setStartInput] = useState(globalDateRange.startDate);
+  const [endInput, setEndInput] = useState(globalDateRange.endDate);
+
+  useEffect(() => {
+    setTeacherNameDraft(selectedPlan?.teacherName ?? '');
+    setClassNameDraft(selectedPlan?.className ?? '');
+  }, [selectedPlan?.id, selectedPlan?.teacherName, selectedPlan?.className]);
+
+  useEffect(() => {
+    setStartInput(globalDateRange.startDate);
+    setEndInput(globalDateRange.endDate);
+  }, [globalDateRange.startDate, globalDateRange.endDate]);
+
   const selectedTeacherGroup = useMemo(() => {
     if (!selectedPlan) return null;
     const groups = groupPlansByTeacher(plans);
@@ -167,25 +195,50 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
 
   const sheets: SheetItem[] = useMemo(() => {
+    const withPrintDraft = (plan: ClassPlan): ClassPlan => {
+      if (!selectedPlan) return plan;
+      const cleanTeacher = teacherNameDraft.trim();
+      const cleanClass = classNameDraft.trim();
+      if (plan.id === selectedPlan.id) {
+        return {
+          ...plan,
+          teacherName: cleanTeacher || plan.teacherName,
+          className: cleanClass || plan.className,
+        };
+      }
+      if (
+        scope === 'teacher' &&
+        cleanTeacher &&
+        normalizeTeacherKey(plan.teacherName) === normalizeTeacherKey(selectedPlan.teacherName)
+      ) {
+        return {
+          ...plan,
+          teacherName: cleanTeacher,
+        };
+      }
+      return plan;
+    };
+
     if (scope === 'all') {
       return plans.map((plan) => ({
         key: plan.id,
-        plan,
+        plan: withPrintDraft(plan),
         qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
       }));
     }
     if (scope === 'teacher' && selectedTeacherGroup) {
       return selectedTeacherGroup.plans.map((plan) => ({
         key: plan.id,
-        plan,
+        plan: withPrintDraft(plan),
         qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
       }));
     }
     if (!selectedPlan) return [];
+    const previewPlan = withPrintDraft(selectedPlan);
     if (generatedTrackers.length > 0 && generatedTrackers[0].classPlanId === selectedPlan.id) {
       return generatedTrackers.map((t) => ({
         key: t.id,
-        plan: selectedPlan,
+        plan: previewPlan,
         studentTracker: t,
         qrUrl: `${origin}/?tracker=${encodeURIComponent(t.id)}`,
       }));
@@ -193,11 +246,70 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
     return [
       {
         key: selectedPlan.id,
-        plan: selectedPlan,
+        plan: previewPlan,
         qrUrl: `${origin}/?track=${encodeURIComponent(selectedPlan.slug)}`,
       },
     ];
-  }, [scope, plans, selectedTeacherGroup, selectedPlan, generatedTrackers, origin]);
+  }, [
+    scope,
+    plans,
+    selectedTeacherGroup,
+    selectedPlan,
+    generatedTrackers,
+    origin,
+    teacherNameDraft,
+    classNameDraft,
+  ]);
+
+  const handleSavePrePrintNames = async (applyToAllTeacherClasses = false) => {
+    if (!selectedPlan) return;
+    const nextTeacher = teacherNameDraft.trim();
+    const nextClass = classNameDraft.trim();
+    if (!nextTeacher || !nextClass) {
+      setMessage('Teacher name and class name cannot be empty.');
+      return;
+    }
+
+    setBusy(true);
+    setMessage(null);
+    try {
+      if (applyToAllTeacherClasses && selectedTeacherGroup && selectedTeacherGroup.plans.length > 1) {
+        for (const p of selectedTeacherGroup.plans) {
+          await onSavePlan(p.id, {
+            teacherName: nextTeacher,
+            className: p.id === selectedPlan.id ? nextClass : p.className,
+          });
+        }
+        setMessage(
+          `Saved "${nextTeacher}" across all ${selectedTeacherGroup.plans.length} classes.`
+        );
+      } else {
+        await onSavePlan(selectedPlan.id, {
+          teacherName: nextTeacher,
+          className: nextClass,
+        });
+        setMessage(`Saved pre-print header: ${nextTeacher} (${nextClass}).`);
+      }
+    } catch (err) {
+      setMessage((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleApplyPrintDates = async () => {
+    if (!startInput || !endInput) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      await onUpdateGlobalDateRange(startInput, endInput, false);
+      setMessage(`Updated printout revision dates to ${startInput} – ${endInput}.`);
+    } catch (err) {
+      setMessage((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleGeneratePersonalSheets = async () => {
     if (!selectedPlan) return;
@@ -424,6 +536,120 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Row 3: Pre-Printing Field Edits (Teacher Name, Class Name & Revision Dates) */}
+          {selectedPlan && (
+            <div className="border-t border-slate-100 pt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              {scope !== 'all' && (
+                <div className="flex flex-wrap items-end gap-3 flex-1">
+                  <div className="min-w-[190px] flex-1 max-w-xs">
+                    <label
+                      htmlFor="print-teacher-name-edit"
+                      className="block text-xs font-medium text-slate-600 mb-1"
+                    >
+                      Teacher Name (Pre-Print Edit)
+                    </label>
+                    <input
+                      id="print-teacher-name-edit"
+                      type="text"
+                      value={teacherNameDraft}
+                      onChange={(e) => setTeacherNameDraft(e.target.value)}
+                      placeholder="e.g. Apa Faiza"
+                      className="w-full min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="min-w-[150px] flex-1 max-w-[220px]">
+                    <label
+                      htmlFor="print-class-name-edit"
+                      className="block text-xs font-medium text-slate-600 mb-1"
+                    >
+                      Class Title (Pre-Print Edit)
+                    </label>
+                    <input
+                      id="print-class-name-edit"
+                      type="text"
+                      value={classNameDraft}
+                      onChange={(e) => setClassNameDraft(e.target.value)}
+                      placeholder="e.g. Year 1A"
+                      className="w-full min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={
+                      busy ||
+                      (teacherNameDraft.trim() === selectedPlan.teacherName &&
+                        classNameDraft.trim() === selectedPlan.className)
+                    }
+                    onClick={() => void handleSavePrePrintNames(false)}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    Save Name
+                  </button>
+
+                  {selectedTeacherGroup && selectedTeacherGroup.plans.length > 1 && (
+                    <button
+                      type="button"
+                      disabled={busy || teacherNameDraft.trim() === selectedPlan.teacherName}
+                      onClick={() => void handleSavePrePrintNames(true)}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Apply to All {selectedTeacherGroup.plans.length} Classes
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-end gap-2.5 shrink-0">
+                <div>
+                  <label
+                    htmlFor="print-start-date"
+                    className="block text-xs font-medium text-slate-600 mb-1"
+                  >
+                    Start Date
+                  </label>
+                  <input
+                    id="print-start-date"
+                    type="date"
+                    value={startInput}
+                    onChange={(e) => setStartInput(e.target.value)}
+                    className="min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-mono-tabular text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="print-end-date"
+                    className="block text-xs font-medium text-slate-600 mb-1"
+                  >
+                    End Date
+                  </label>
+                  <input
+                    id="print-end-date"
+                    type="date"
+                    value={endInput}
+                    onChange={(e) => setEndInput(e.target.value)}
+                    className="min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-mono-tabular text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={
+                    busy ||
+                    (startInput === globalDateRange.startDate &&
+                      endInput === globalDateRange.endDate)
+                  }
+                  onClick={() => void handleApplyPrintDates()}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Calendar className="h-3.5 w-3.5 text-teal-700" />
+                  Update Dates
+                </button>
+              </div>
+            </div>
+          )}
 
           {scope === 'single' && selectedPlan && (
             <div className="border-t border-slate-100 pt-4 flex flex-col gap-3 sm:flex-row sm:items-end">

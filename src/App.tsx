@@ -425,12 +425,28 @@ export default function App() {
               <PrintStudio
                 plans={plans}
                 activeTermName={activeTermName}
+                globalDateRange={globalDateRange}
                 selectedPlanId={selectedPlanId}
                 onSelectPlanId={setSelectedPlanId}
                 includeWeekends={includeWeekends}
                 onToggleWeekends={setIncludeWeekends}
                 onOpenQrPreview={openQrPreview}
                 onTrackerCreated={loadState}
+                onSavePlan={async (id, payload) => {
+                  const res = await updateClassPlan(id, payload);
+                  setPlans((prev) => prev.map((p) => (p.id === id ? res.plan : p)));
+                  setTrackersSummary(res.trackersSummary);
+                }}
+                onUpdateGlobalDateRange={async (startDate, endDate, overwriteManual) => {
+                  const res = await updateGlobalDateRange({
+                    startDate,
+                    endDate,
+                    overwriteManual,
+                  });
+                  setGlobalDateRange(res.globalDateRange);
+                  setPlans(res.plans);
+                  setTrackersSummary(res.trackersSummary);
+                }}
               />
             )}
 

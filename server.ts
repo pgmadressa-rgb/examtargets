@@ -654,6 +654,12 @@ async function startServer(): Promise<void> {
       ? generateDailySchedule(existing.slug, nextTrack, nextTargets, nextRange)
       : body.dailySchedule ?? existing.dailySchedule;
 
+    const scheduleOrTargetsEdited =
+      body.dailySchedule !== undefined ||
+      body.targets !== undefined ||
+      body.trackType !== undefined ||
+      body.dateRange !== undefined;
+
     const updated: ClassPlan = {
       ...existing,
       teacherName: body.teacherName?.trim() || existing.teacherName,
@@ -663,7 +669,9 @@ async function startServer(): Promise<void> {
       groups,
       dateRange: nextRange,
       dailySchedule,
-      manuallyEdited: body.regenerateFromTeacherInput ? false : body.manuallyEdited ?? true,
+      manuallyEdited: body.regenerateFromTeacherInput
+        ? false
+        : body.manuallyEdited ?? (scheduleOrTargetsEdited ? true : existing.manuallyEdited),
     };
 
     store.plans[idx] = updated;
