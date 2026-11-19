@@ -347,17 +347,17 @@ export const CsvUploadView: React.FC<CsvUploadViewProps> = ({
           ) : (
             <div className="space-y-3 text-xs leading-relaxed text-slate-600">
               <p>
-                Your workspace is currently seeded with the <strong>13 November 2026</strong>{' '}
-                teacher responses from the uploaded spreadsheet (May 2026 rows excluded).
+                Your workspace is seeded with the <strong>November 2026</strong> teacher responses
+                from the updated spreadsheet (May 2026 rows excluded).
               </p>
               <div className="rounded-lg bg-slate-50 p-3 space-y-1.5">
                 <div className="font-semibold text-slate-800">
-                  Excel Workbooks, Multi-Class &amp; Updated Fields
+                  Dual-Class (Quran &amp; Islamic Studies), Excel &amp; Multi-Sheet Support
                 </div>
                 <p className="text-slate-600">
-                  Upload any Excel (.xlsx, .xls, .ods) or CSV export from Google Forms or Microsoft
-                  Forms—multi-sheet workbooks let you choose a tab, headers are matched dynamically,
-                  secondary class columns split automatically, and extra columns are preserved.
+                  Upload any Excel (.xlsx, .xls, .ods) or CSV export—when a teacher selects{' '}
+                  <strong>Islamic Studies Class: Yes</strong> for a different class than their
+                  Quran/Qaidah class, both classes split automatically with isolated targets.
                 </p>
               </div>
             </div>

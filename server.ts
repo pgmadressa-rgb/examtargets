@@ -34,7 +34,11 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(__dirname, 'data');
 const STORE_PATH = path.join(DATA_DIR, 'store.json');
 const VAPID_PATH = path.join(DATA_DIR, 'vapid.json');
-const SEED_CSV_PATH = path.resolve(__dirname, 'public/assets/aistudio/_Revision___Responses__9f810d9c');
+const SEED_CSV_PATH = fs.existsSync(
+  path.resolve(__dirname, 'public/assets/aistudio/_Revision___Responses__b317a125')
+)
+  ? path.resolve(__dirname, 'public/assets/aistudio/_Revision___Responses__b317a125')
+  : path.resolve(__dirname, 'public/assets/aistudio/_Revision___Responses__9f810d9c');
 
 interface StoredPushRecord extends PushSubscriptionInfo {
   subscription: webpushTypes.PushSubscription;
@@ -186,6 +190,18 @@ function loadStore(): StoreData {
                   }
             )
           : raw.plans;
+
+        const isUntouchedLegacySeed =
+          raw.totalCsvRows === 42 &&
+          raw.plans.length === 13 &&
+          Object.keys(raw.trackers || {}).length === 0 &&
+          Object.keys(raw.savedTerms || {}).length === 0 &&
+          !raw.plans.some((p) => p.manuallyEdited);
+        if (isUntouchedLegacySeed) {
+          const upgraded = createSeedStore();
+          fs.writeFileSync(STORE_PATH, JSON.stringify(upgraded, null, 2));
+          return upgraded;
+        }
 
         const loaded: StoreData = {
           activeTermName: raw.activeTermName || 'December 2026 Exams',

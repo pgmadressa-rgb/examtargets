@@ -168,10 +168,24 @@ export function extractYearMonth(timestamp: string): string | null {
 
 export function normalizeTrackType(raw: string): TrackType {
   const lower = raw.toLowerCase();
-  if (lower.includes('islamic studies only')) return 'Islamic Studies Only';
+  if (lower.includes('islamic studies')) return 'Islamic Studies Only';
   if (lower.includes('qaidah')) return 'Qaidah';
   if (lower.includes('juzz') || lower.includes('juz')) return "Juzz 'Amma";
   return 'Quran/Panj Para';
+}
+
+function normalizeClassComparisonKey(name: string): string {
+  return cleanCell(name)
+    .toLowerCase()
+    .replace(/\b(class|year|yr)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function areSameClassName(a: string, b: string): boolean {
+  const ka = normalizeClassComparisonKey(a);
+  const kb = normalizeClassComparisonKey(b);
+  if (!ka || !kb) return false;
+  return ka === kb;
 }
 
 export function enumerateDates(range: DateRange): Array<{ date: string; weekday: string; dayIndex: number; dow: number }> {
@@ -795,6 +809,7 @@ interface ColumnMap {
   timestamp: number;
   teacher: number;
   class1: number;
+  isClass: number;
   class2: number;
   track: number;
   quranTarget: number;
@@ -852,7 +867,7 @@ function buildColumnMap(headerRow: string[]): ColumnMap {
   const isSecondaryHeader = (h: string) =>
     /(class\s*2|2nd\s*class|second\s*class|class\s*two)/i.test(h);
 
-  // Pass 1: Match all explicit headers first so extra/new columns are never hijacked
+  // Pass 1: Match primary class, track, and Islamic Studies toggle BEFORE secondary class column
   const mTimestamp = matchCol([(h) => h.includes('timestamp') || h === 'date']);
   const mTeacher = matchCol([
     (h) => h.includes('ustadh') || h.includes('apa') || h.includes('teacher'),
@@ -861,6 +876,12 @@ function buildColumnMap(headerRow: string[]): ColumnMap {
     (h) =>
       !isSecondaryHeader(h) &&
       (h.includes('which class') || h.includes('class no') || h === 'class' || h.includes('class 1')),
+  ]);
+  const mTrack = matchCol([
+    (h) => !isSecondaryHeader(h) && (h.includes('quran or qaidah') || h.includes('track')),
+  ]);
+  const mIsEnabled = matchCol([
+    (h) => !isSecondaryHeader(h) && h.includes('islamic studies class'),
   ]);
   const class2 = matchCol([
     (h) =>
@@ -871,13 +892,20 @@ function buildColumnMap(headerRow: string[]): ColumnMap {
       !h.includes('plan') &&
       !h.includes('tajweed'),
   ]);
-  const mTrack = matchCol([
-    (h) => !isSecondaryHeader(h) && (h.includes('quran or qaidah') || h.includes('track')),
+  // Matches the second "Which Class (one per form)?" column right after "Islamic Studies Class?"
+  const isClass = matchCol([
+    (h) =>
+      !isSecondaryHeader(h) &&
+      (h.includes('which class') ||
+        h.includes('class no') ||
+        h === 'class' ||
+        h.includes('islamic studies class') ||
+        h.includes('is class')),
   ]);
   const mQuranTarget = matchCol([
     (h) =>
       !isSecondaryHeader(h) &&
-      (h.includes('exam targets') || (h.includes('quran') && h.includes('target'))),
+      (h.includes('exam target') || (h.includes('quran') && h.includes('target'))),
   ]);
   const mTajweed = matchCol([
     (h) => !isSecondaryHeader(h) && (h.includes('tajweed') || h.includes('makhraj')),
@@ -893,12 +921,9 @@ function buildColumnMap(headerRow: string[]): ColumnMap {
     (h) =>
       !isSecondaryHeader(h) && h.includes('surah') && (h.includes('per day') || h.includes('daily')),
   ]);
-  const mIsEnabled = matchCol([
-    (h) => !isSecondaryHeader(h) && h.includes('islamic studies class'),
-  ]);
   const mFiqh = matchCol([(h) => !isSecondaryHeader(h) && h.includes('fiqh')]);
   const mAqaaid = matchCol([
-    (h) => !isSecondaryHeader(h) && (h.includes('aqaaid') || h.includes('aqeedah')),
+    (h) => !isSecondaryHeader(h) && (h.includes('aqaaid') || h.includes('aqaid') || h.includes('aqeedah')),
   ]);
   const mSeerah = matchCol([
     (h) => !isSecondaryHeader(h) && (h.includes('seerah') || h.includes('sirah')),
@@ -974,6 +999,7 @@ function buildColumnMap(headerRow: string[]): ColumnMap {
     timestamp,
     teacher,
     class1,
+    isClass,
     class2,
     track,
     quranTarget,
@@ -1066,8 +1092,9 @@ export function parseMadrasahRows(
     const r = dataRows[i];
     const timestamp = getCell(r, col.timestamp);
     const teacherName = getCell(r, col.teacher);
-    const className = getCell(r, col.class1);
-    if (!teacherName && !className) continue;
+    const quranClassName = getCell(r, col.class1);
+    const isClassName = getCell(r, col.isClass);
+    if (!teacherName && !quranClassName && !isClassName) continue;
 
     const ym = extractYearMonth(timestamp);
     if (onlyNov && ym !== '2026-11') {
@@ -1088,59 +1115,119 @@ export function parseMadrasahRows(
       }
     }
 
-    const trackType = normalizeTrackType(getCell(r, col.track));
-    const isEnabled = getCell(r, col.isEnabled).toLowerCase().startsWith('y');
+    const trackRaw = getCell(r, col.track);
+    const trackType = normalizeTrackType(trackRaw);
+    const part1IsIslamicOnly = trackType === 'Islamic Studies Only';
+    const isCellLower = getCell(r, col.isEnabled).toLowerCase();
+    const isExplicitYes = isCellLower.startsWith('y');
+    const isExplicitNo = isCellLower.startsWith('n');
 
-    const targets: ClassTargets = {
-      quranOrQaidah: getCell(r, col.quranTarget) || 'NA',
-      tajweedMakhraj: getCell(r, col.tajweed) || 'NA',
-      surahTargets: getCell(r, col.surahTargets) || 'NA',
-      quranDailyQuota: getCell(r, col.quranDaily) || 'NA',
-      surahDailyQuota: getCell(r, col.surahDaily) || 'NA',
-      islamicStudies: {
-        enabled: isEnabled,
-        fiqh: getCell(r, col.fiqh),
-        aqaaid: getCell(r, col.aqaaid),
-        seerah: getCell(r, col.seerah),
-        hadith: getCell(r, col.hadith),
-        adaab: getCell(r, col.adaab),
-        islamicHistory: getCell(r, col.islamicHistory),
-        akhlaaq: getCell(r, col.akhlaaq),
-        duas: getCell(r, col.duas),
-        revisionPlanNote: getCell(r, col.revisionPlan),
-      },
+    const islamicStudiesFields = {
+      fiqh: getCell(r, col.fiqh),
+      aqaaid: getCell(r, col.aqaaid),
+      seerah: getCell(r, col.seerah),
+      hadith: getCell(r, col.hadith),
+      adaab: getCell(r, col.adaab),
+      islamicHistory: getCell(r, col.islamicHistory),
+      akhlaaq: getCell(r, col.akhlaaq),
+      duas: getCell(r, col.duas),
+      revisionPlanNote: getCell(r, col.revisionPlan),
+    };
+    const emptyIslamicStudies = {
+      enabled: false,
+      fiqh: '',
+      aqaaid: '',
+      seerah: '',
+      hadith: '',
+      adaab: '',
+      islamicHistory: '',
+      akhlaaq: '',
+      duas: '',
+      revisionPlanNote: '',
+    };
+    const hasMeaningfulIsFields = Object.values(islamicStudiesFields).some((v) => isMeaningful(v));
+    const hasIslamicStudiesSection =
+      part1IsIslamicOnly || isExplicitYes || (!isExplicitNo && hasMeaningfulIsFields);
+
+    const hasSeparateIsClass =
+      !part1IsIslamicOnly &&
+      hasIslamicStudiesSection &&
+      isMeaningful(isClassName) &&
+      (!isMeaningful(quranClassName) || !areSameClassName(quranClassName, isClassName));
+
+    const primaryClassName = part1IsIslamicOnly
+      ? quranClassName || isClassName || 'Main Class'
+      : quranClassName || 'Main Class';
+
+    const primaryTargets: ClassTargets = {
+      quranOrQaidah: part1IsIslamicOnly ? 'NA' : getCell(r, col.quranTarget) || 'NA',
+      tajweedMakhraj: part1IsIslamicOnly ? 'NA' : getCell(r, col.tajweed) || 'NA',
+      surahTargets: part1IsIslamicOnly ? 'NA' : getCell(r, col.surahTargets) || 'NA',
+      quranDailyQuota: part1IsIslamicOnly ? 'NA' : getCell(r, col.quranDaily) || 'NA',
+      surahDailyQuota: part1IsIslamicOnly ? 'NA' : getCell(r, col.surahDaily) || 'NA',
+      islamicStudies: hasSeparateIsClass
+        ? emptyIslamicStudies
+        : {
+            enabled: part1IsIslamicOnly || isExplicitYes || hasMeaningfulIsFields,
+            ...islamicStudiesFields,
+          },
       ...(extraNotes.length > 0 ? { extraNotes } : {}),
     };
 
-    pushClassPlan({
-      timestamp,
-      submittedMonth: ym ?? '2026-11',
-      teacherName,
-      className: className || 'Main Class',
-      trackType,
-      targets,
-    });
+    if (!hasSeparateIsClass || isMeaningful(quranClassName)) {
+      pushClassPlan({
+        timestamp,
+        submittedMonth: ym ?? '2026-11',
+        teacherName,
+        className: primaryClassName,
+        trackType,
+        targets: primaryTargets,
+      });
+    }
 
-    // Support secondary class submitted in extra columns on the same row
+    // Split separate Islamic Studies class from Part 2 ("Islamic Studies Class?" -> Yes + second "Which Class?")
+    if (hasSeparateIsClass) {
+      pushClassPlan({
+        timestamp,
+        submittedMonth: ym ?? '2026-11',
+        teacherName,
+        className: isClassName,
+        trackType: 'Islamic Studies Only',
+        targets: {
+          quranOrQaidah: 'NA',
+          tajweedMakhraj: 'NA',
+          surahTargets: 'NA',
+          quranDailyQuota: 'NA',
+          surahDailyQuota: 'NA',
+          islamicStudies: {
+            enabled: true,
+            ...islamicStudiesFields,
+          },
+          ...(extraNotes.length > 0 ? { extraNotes } : {}),
+        },
+      });
+    }
+
+    // Support explicit secondary class columns ("Class 2", "Second Class") if present on custom forms
     const secondClassName = getCell(r, col.class2);
     if (isMeaningful(secondClassName)) {
       const c2Track = isMeaningful(getCell(r, col.class2Track))
         ? normalizeTrackType(getCell(r, col.class2Track))
         : trackType;
       const c2IsRaw = getCell(r, col.class2IsEnabled);
-      const c2IsEnabled = c2IsRaw ? c2IsRaw.toLowerCase().startsWith('y') : isEnabled;
+      const c2IsEnabled = c2IsRaw ? c2IsRaw.toLowerCase().startsWith('y') : isExplicitYes;
 
       const c2Targets: ClassTargets = {
-        quranOrQaidah: getCell(r, col.class2QuranTarget) || targets.quranOrQaidah,
-        tajweedMakhraj: getCell(r, col.class2Tajweed) || targets.tajweedMakhraj,
-        surahTargets: getCell(r, col.class2SurahTargets) || targets.surahTargets,
-        quranDailyQuota: getCell(r, col.class2QuranDaily) || targets.quranDailyQuota,
-        surahDailyQuota: getCell(r, col.class2SurahDaily) || targets.surahDailyQuota,
+        quranOrQaidah: getCell(r, col.class2QuranTarget) || primaryTargets.quranOrQaidah,
+        tajweedMakhraj: getCell(r, col.class2Tajweed) || primaryTargets.tajweedMakhraj,
+        surahTargets: getCell(r, col.class2SurahTargets) || primaryTargets.surahTargets,
+        quranDailyQuota: getCell(r, col.class2QuranDaily) || primaryTargets.quranDailyQuota,
+        surahDailyQuota: getCell(r, col.class2SurahDaily) || primaryTargets.surahDailyQuota,
         islamicStudies: {
-          ...targets.islamicStudies,
           enabled: c2IsEnabled,
+          ...islamicStudiesFields,
           revisionPlanNote:
-            getCell(r, col.class2RevisionPlan) || targets.islamicStudies.revisionPlanNote,
+            getCell(r, col.class2RevisionPlan) || islamicStudiesFields.revisionPlanNote,
         },
         ...(extraNotes.length > 0 ? { extraNotes } : {}),
       };
