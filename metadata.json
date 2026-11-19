@@ -1,0 +1,8 @@
+{
+  "name": "Maktab Revision Planner",
+  "description": "Madrasah exam revision planner with an ADHD-friendly admin report, printable parent QR checklists, and daily push reminders.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
