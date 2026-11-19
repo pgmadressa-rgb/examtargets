@@ -62,26 +62,74 @@ function ensureDataDir(): void {
   }
 }
 
-function loadOrCreateVapidKeys(): VapidKeys {
-  const envPublic = process.env.VAPID_PUBLIC_KEY?.trim();
-  const envPrivate = process.env.VAPID_PRIVATE_KEY?.trim();
-  if (envPublic && envPrivate) {
-    return { publicKey: envPublic, privateKey: envPrivate };
+function cleanVapidValue(val: string | undefined): string {
+  if (!val) return '';
+  let trimmed = val.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
   }
+  return trimmed.replace(/=+$/, '');
+}
+
+function tryConfigureVapid(keys: VapidKeys): boolean {
+  const publicKey = cleanVapidValue(keys.publicKey);
+  const privateKey = cleanVapidValue(keys.privateKey);
+  if (!publicKey || !privateKey) return false;
+  try {
+    const pubBuf = Buffer.from(publicKey, 'base64url');
+    const privBuf = Buffer.from(privateKey, 'base64url');
+    if (pubBuf.length !== 65 || privBuf.length !== 32) {
+      return false;
+    }
+    webpush.setVapidDetails('mailto:pgmadressa@gmail.com', publicKey, privateKey);
+    keys.publicKey = publicKey;
+    keys.privateKey = privateKey;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function initVapidKeys(): VapidKeys {
+  const envPublic = cleanVapidValue(process.env.VAPID_PUBLIC_KEY);
+  const envPrivate = cleanVapidValue(process.env.VAPID_PRIVATE_KEY);
+  if (envPublic && envPrivate) {
+    const envPair: VapidKeys = { publicKey: envPublic, privateKey: envPrivate };
+    if (tryConfigureVapid(envPair)) {
+      return envPair;
+    }
+    console.warn('Ignoring invalid VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY env vars; falling back.');
+  }
+
   ensureDataDir();
   if (fs.existsSync(VAPID_PATH)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(VAPID_PATH, 'utf-8')) as VapidKeys;
-      if (parsed.publicKey && parsed.privateKey) {
+      if (parsed.publicKey && parsed.privateKey && tryConfigureVapid(parsed)) {
         return parsed;
       }
+      console.warn('Regenerating invalid data/vapid.json keys.');
     } catch {
       // Regenerate below
     }
   }
-  const keys = webpush.generateVAPIDKeys();
-  fs.writeFileSync(VAPID_PATH, JSON.stringify(keys, null, 2));
-  return keys;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const generated = webpush.generateVAPIDKeys();
+    if (tryConfigureVapid(generated)) {
+      try {
+        fs.writeFileSync(VAPID_PATH, JSON.stringify(generated, null, 2));
+      } catch {
+        // Ignore read-only disk environments
+      }
+      return generated;
+    }
+  }
+
+  return { publicKey: '', privateKey: '' };
 }
 
 function createSeedStore(): StoreData {
@@ -170,12 +218,7 @@ function saveStore(): void {
   fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
 }
 
-const vapidKeys = loadOrCreateVapidKeys();
-webpush.setVapidDetails(
-  'mailto:pgmadressa@gmail.com',
-  vapidKeys.publicKey,
-  vapidKeys.privateKey
-);
+const vapidKeys = initVapidKeys();
 
 function getRelevantTasksForTracker(plan: ClassPlan, tracker: StudentTracker) {
   const allTasks = plan.dailySchedule.flatMap((d) => d.tasks);
