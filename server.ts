@@ -63,6 +63,11 @@ function ensureDataDir(): void {
 }
 
 function loadOrCreateVapidKeys(): VapidKeys {
+  const envPublic = process.env.VAPID_PUBLIC_KEY?.trim();
+  const envPrivate = process.env.VAPID_PRIVATE_KEY?.trim();
+  if (envPublic && envPrivate) {
+    return { publicKey: envPublic, privateKey: envPrivate };
+  }
   ensureDataDir();
   if (fs.existsSync(VAPID_PATH)) {
     try {
