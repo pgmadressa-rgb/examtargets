@@ -14,7 +14,7 @@ export const DEFAULT_DATE_RANGE: DateRange = {
   endDate: '2026-12-14',
 };
 
-const EMPTY_VALUES = new Set(['', 'na', 'n/a', 'none', 'nil', '-', 'no']);
+const EMPTY_VALUES = new Set(['', '.', '..', '...', 'na', 'n/a', 'none', 'nil', '-', '—', 'no']);
 
 export function cleanCell(val: string | undefined): string {
   if (!val) return '';
@@ -24,6 +24,7 @@ export function cleanCell(val: string | undefined): string {
 export function isMeaningful(val: string | undefined): boolean {
   const c = cleanCell(val);
   if (!c) return false;
+  if (/^[.\-_—\s]+$/.test(c)) return false;
   return !EMPTY_VALUES.has(c.toLowerCase());
 }
 
@@ -216,48 +217,459 @@ export function enumerateDates(range: DateRange): Array<{ date: string; weekday:
   return result;
 }
 
-function parsePageRange(text: string): { start: number; end: number } | null {
-  const cleaned = text.replace(/\n/g, ' ');
-  const rangeMatch = /(?:pages?|pg\.?)\s*(\d+)\s*(?:-|to|until)\s*(?:pages?|pg\.?)?\s*(\d+)/i.exec(cleaned);
-  if (rangeMatch) {
-    const a = Number(rangeMatch[1]);
-    const b = Number(rangeMatch[2]);
-    if (b >= a && b <= 900) return { start: a, end: b };
+function parseNumberSet(text: string, allowImplicitQaidahSingle = false): number[] {
+  const cleaned = text
+    .replace(/\n/g, ' ')
+    .replace(/\b(?:lesson|topic|year|yr|book|para|juz|juzz)\s*\d+(?:\s*[-–to]+\s*\d+)?/gi, ' ');
+
+  const nums = new Set<number>();
+  const addRange = (a: number, b: number) => {
+    if (a < 1 || b > 900 || b < a) return;
+    for (let n = a; n <= b; n++) nums.add(n);
+  };
+
+  // 1. Explicit "Page X - Y" or "Pg X to Pg Y"
+  const prefixMatches = cleaned.matchAll(
+    /(?:pages?|pgs?\.?)\s*(\d+)\s*(?:-|–|to|unt[a-z]{1,4})\s*(?:pages?|pgs?\.?)?\s*(\d+)/gi
+  );
+  for (const m of prefixMatches) {
+    addRange(Number(m[1]), Number(m[2]));
   }
-  const untilMatch = /(?:until|upto|up to|end of)\s*(?:page|pg\.?)?\s*(\d+)/i.exec(cleaned);
-  if (untilMatch) {
-    const end = Number(untilMatch[1]);
-    if (end >= 2 && end <= 300) return { start: 1, end };
+
+  // 2. Postfix "1 - 35 pg"
+  const postfixMatches = cleaned.matchAll(
+    /(\d+)\s*(?:-|–|to)\s*(\d+)\s*(?:pages?|pgs?\.?)\b/gi
+  );
+  for (const m of postfixMatches) {
+    addRange(Number(m[1]), Number(m[2]));
   }
-  const singlePageMatch = /^page\s*(\d+)$/i.exec(cleaned.trim());
-  if (singlePageMatch) {
-    const end = Number(singlePageMatch[1]);
-    if (end >= 2 && end <= 300) return { start: 1, end };
+
+  // 3. "Until / end of page 28" (handles typos like "untik")
+  if (nums.size === 0) {
+    const untilMatch = /(?:unt[a-z]{1,4}|upto|up\s*to|end\s*of)\s*(?:page|pg\.?)?\s*(\d+)/i.exec(cleaned);
+    if (untilMatch) {
+      addRange(1, Number(untilMatch[1]));
+    }
+  }
+
+  // 4. Parenthetical "(Page 24)"
+  if (nums.size === 0) {
+    const parenMatch = /\(\s*pages?\s*(\d+)\s*\)/i.exec(cleaned);
+    if (parenMatch) {
+      addRange(1, Number(parenMatch[1]));
+    }
+  }
+
+  // 5. Bare numeric range with optional "& 48, 49" (e.g. "28 - 39 & 48, 49", "132 - 143")
+  if (nums.size === 0) {
+    const bareMatch = /^\s*(\d+)\s*(?:-|–|to)\s*(\d+)(.*)$/.exec(cleaned.trim());
+    if (bareMatch) {
+      addRange(Number(bareMatch[1]), Number(bareMatch[2]));
+      const tail = bareMatch[3] || '';
+      const extraSingles = tail.matchAll(/(?:&|,|\band\b)\s*(\d+)\b/gi);
+      for (const em of extraSingles) {
+        const val = Number(em[1]);
+        if (val >= 1 && val <= 900) nums.add(val);
+      }
+    }
+  }
+
+  // 6. Standalone "Page N" (for Qaidah books e.g. "Page 29" means Pages 1-29)
+  if (nums.size === 0) {
+    const singlePageMatch = /\bpages?\s*(\d+)\b/i.exec(cleaned);
+    if (singlePageMatch) {
+      const n = Number(singlePageMatch[1]);
+      if (allowImplicitQaidahSingle && n >= 8 && n <= 120) {
+        addRange(1, n);
+      } else if (n >= 1 && n <= 900) {
+        nums.add(n);
+      }
+    }
+  }
+
+  return Array.from(nums).sort((a, b) => a - b);
+}
+
+function parsePageRange(text: string, allowImplicitQaidahSingle = false): { start: number; end: number } | null {
+  const nums = parseNumberSet(text, allowImplicitQaidahSingle);
+  if (nums.length < 2) return null;
+  return { start: nums[0], end: nums[nums.length - 1] };
+}
+
+function formatPageNumbers(nums: number[]): string {
+  if (nums.length === 0) return '';
+  if (nums.length === 1) return `Page ${nums[0]}`;
+  const ranges: string[] = [];
+  let start = nums[0];
+  let prev = nums[0];
+  for (let i = 1; i < nums.length; i++) {
+    if (nums[i] === prev + 1) {
+      prev = nums[i];
+    } else {
+      ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
+      start = nums[i];
+      prev = nums[i];
+    }
+  }
+  ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
+  return `Pages ${ranges.join(', ')}`;
+}
+
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+function extractNumberToken(raw: string): number | null {
+  const numM = /(\d+(?:\.\d+)?)/.exec(raw);
+  if (numM) return Number(numM[1]);
+  const words = raw.toLowerCase().split(/[^a-z]+/);
+  for (const w of words) {
+    if (WORD_NUMBERS[w] !== undefined) return WORD_NUMBERS[w];
   }
   return null;
 }
 
 function parseDailyPageCount(quota: string): number | null {
   const lower = quota.toLowerCase();
-  if (lower.includes('one page')) return 1;
-  const match = /(\d+)\s*(?:pages?|sides?)/i.exec(quota);
-  if (match) return Number(match[1]);
+  if (lower.includes('1 side') || /\bone\s+side\b/i.test(lower)) return 1;
+  const digitMatch = /(\d+(?:\.\d+)?)\s*(?:pages?|pgs?|sides?|rukus?)/i.exec(quota);
+  if (digitMatch) return Number(digitMatch[1]);
+  const wordMatch = /\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:pages?|pgs?|sides?)\b/i.exec(lower);
+  if (wordMatch) return WORD_NUMBERS[wordMatch[1]] ?? null;
+  const numOnly = /^(\d+(?:\.\d+)?)$/.exec(quota.trim());
+  if (numOnly) return Number(numOnly[1]);
+  return null;
+}
+
+const DEFAULT_TAJWEED_RULES = [
+  'Noon Sakinah: Izhar & Idgham',
+  'Noon Sakinah: Ikhfa & Iqlab',
+  'Meem Sakinah & Ghunnah',
+  'Qalqalah Letters',
+  'Madd Asli & Madd Munfasil',
+  'Madd Muttasil & Madd Lazim',
+  'Heavy Letters (Tafkheem)',
+  'Rules of Raa & Laam',
+  'Throat Letters (Makhraj)',
+];
+
+function cleanTajweedLabel(raw: string): string {
+  const s = raw
+    .replace(/\bthort\b/gi, 'Throat')
+    .replace(/\bingham\b/gi, 'Idgham')
+    .replace(/\bikfah\b/gi, 'Ikhfa')
+    .replace(/\biqlaab\b/gi, 'Iqlab')
+    .replace(/\bizhaar\b/gi, 'Izhar')
+    .replace(/\bgunnah\b/gi, 'Ghunnah')
+    .replace(/\bqalqala\b/gi, 'Qalqalah')
+    .replace(/\brull\b/gi, 'Rules')
+    .replace(/\bmad\b/gi, 'Madd')
+    .replace(/\bmudoods?\b/gi, 'Madd Rules')
+    .replace(/\bmutasil\b/gi, 'Madd Muttasil')
+    .replace(/\bmunfasil\b/gi, 'Madd Munfasil')
+    .replace(/\blaazim\b/gi, 'Madd Lazim')
+    .replace(/\b(madd\s+)+/gi, 'Madd ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .trim();
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function splitTajweedRules(raw: string): string[] {
+  if (!isMeaningful(raw)) return [];
+  const trimmedLower = raw.toLowerCase().trim();
+  if (/^all\s+throat\s+letters$/i.test(trimmedLower)) {
+    return ['Throat Letters (Makhraj)'];
+  }
+  if (
+    /^(?:all(?:\s+(?:tajweed|rules))?|all\s*-\s*except\b.*|tajweed\s+covered.*|sheet\s+provided.*)$/i.test(
+      trimmedLower
+    ) ||
+    trimmedLower.includes('all tajweed rules')
+  ) {
+    return DEFAULT_TAJWEED_RULES;
+  }
+  const norm = raw
+    .replace(/[\n•()]+/g, ',')
+    .replace(/\+/g, ',')
+    .replace(/\band\b/gi, ',')
+    .replace(/\b(noonsakin|noon sakin)\s*(?:,|and)?\s*(tanween)\s*rules?/gi, 'Noon Sakinah & Tanween')
+    .replace(/\bmeem sakin rules?/gi, 'Meem Sakinah')
+    .replace(/[-–]/g, ' ');
+  const parts = norm
+    .split(',')
+    .map(cleanTajweedLabel)
+    .filter((s) => s.length > 1 && !EMPTY_VALUES.has(s.toLowerCase()) && !/^rules?$/i.test(s));
+  return parts.length > 0 ? parts : DEFAULT_TAJWEED_RULES.slice(0, 4);
+}
+
+const CANONICAL_SURAHS: Array<{ num: number; name: string; aliases: string[] }> = [
+  { num: 1, name: 'Al-Fatihah', aliases: ['fatiha', 'faatihah', 'fatihah'] },
+  { num: 78, name: 'An-Naba', aliases: ['naba'] },
+  { num: 79, name: "An-Nazi'at", aliases: ['naziat', 'naaziaat'] },
+  { num: 80, name: 'Abasa', aliases: ['abasa'] },
+  { num: 81, name: 'At-Takwir', aliases: ['takwir', 'takweer'] },
+  { num: 82, name: 'Al-Infitar', aliases: ['infitar', 'infitaar'] },
+  { num: 83, name: 'Al-Mutaffifin', aliases: ['mutaffifin', 'mutaffifeen'] },
+  { num: 84, name: 'Al-Inshiqaq', aliases: ['inshiqaq', 'inshiqaaq'] },
+  { num: 85, name: 'Al-Buruj', aliases: ['buruj', 'burooj'] },
+  { num: 86, name: 'At-Tariq', aliases: ['tariq', 'taariq'] },
+  { num: 87, name: "Al-A'la", aliases: ['ala', 'alaa', 'aalaa'] },
+  { num: 88, name: 'Al-Ghashiyah', aliases: ['ghashiyah', 'ghaashiyah'] },
+  { num: 89, name: 'Al-Fajr', aliases: ['fajr'] },
+  { num: 90, name: 'Al-Balad', aliases: ['balad'] },
+  { num: 91, name: 'Ash-Shams', aliases: ['shams'] },
+  { num: 92, name: 'Al-Layl', aliases: ['layl', 'lail'] },
+  { num: 93, name: 'Ad-Duha', aliases: ['duha', 'dhuha', 'duhaa', 'dhuhaa'] },
+  { num: 94, name: 'Ash-Sharh', aliases: ['sharh', 'inshirah', 'inshiraah'] },
+  { num: 95, name: 'At-Tin', aliases: ['tin', 'teen'] },
+  { num: 96, name: "Al-'Alaq", aliases: ['alaq'] },
+  { num: 97, name: 'Al-Qadr', aliases: ['qadr'] },
+  { num: 98, name: 'Al-Bayyinah', aliases: ['bayyinah', 'bayinah'] },
+  { num: 99, name: 'Az-Zalzalah', aliases: ['zalzalah', 'zilzaal', 'zilzal'] },
+  { num: 100, name: "Al-'Adiyat", aliases: ['adiyat', 'aadiyaat'] },
+  { num: 101, name: "Al-Qari'ah", aliases: ['qariah', 'qaariah'] },
+  { num: 102, name: 'At-Takathur', aliases: ['takathur', 'takaathur'] },
+  { num: 103, name: "Al-'Asr", aliases: ['asr'] },
+  { num: 104, name: 'Al-Humazah', aliases: ['humazah', 'humaza'] },
+  { num: 105, name: 'Al-Fil', aliases: ['fil', 'feel'] },
+  { num: 106, name: 'Quraysh', aliases: ['quraysh', 'quraish'] },
+  { num: 107, name: "Al-Ma'un", aliases: ['maun', 'maoon', 'maaun'] },
+  { num: 108, name: 'Al-Kawthar', aliases: ['kawthar', 'kauthar', 'kawsar'] },
+  { num: 109, name: 'Al-Kafirun', aliases: ['kafirun', 'kafiroon', 'kaafiroon'] },
+  { num: 110, name: 'An-Nasr', aliases: ['nasr'] },
+  { num: 111, name: 'Al-Masad', aliases: ['masad', 'lahab'] },
+  { num: 112, name: 'Al-Ikhlas', aliases: ['ikhlas', 'ikhlaas', 'ihklaas'] },
+  { num: 113, name: 'Al-Falaq', aliases: ['falaq'] },
+  { num: 114, name: 'An-Naas', aliases: ['naas', 'nas'] },
+];
+
+function findCanonicalSurahIndex(fragment: string): number {
+  const norm = fragment
+    .toLowerCase()
+    .replace(/['’`]/g, '')
+    .replace(/\b(surah|surahs|al|an|as|at|ad|az|ash|un|ul)\b/g, ' ')
+    .replace(/[^a-z]+/g, ' ')
+    .trim();
+  if (!norm) return -1;
+  const words = norm.split(/\s+/);
+  for (let i = CANONICAL_SURAHS.length - 1; i >= 0; i--) {
+    const entry = CANONICAL_SURAHS[i];
+    if (entry.aliases.some((alias) => words.includes(alias))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function expandSurahList(raw: string): string[] {
+  const flat = raw.replace(/\n/g, ' ').trim();
+  const rangeRegex =
+    /(?:surahs?\s+)?(?:al-|an-|as-|at-|ad-|az-|ash-|ul-|un-)?([a-z'’]+)\s*(?:-|–|to|till|until)\s*(?:surahs?\s+)?(?:al-|an-|as-|at-|ad-|az-|ash-|ul-|un-)?([a-z'’]+)/gi;
+
+  const collected: string[] = [];
+  const seen = new Set<string>();
+  const addName = (label: string) => {
+    if (!seen.has(label)) {
+      seen.add(label);
+      collected.push(label);
+    }
+  };
+
+  for (const m of flat.matchAll(rangeRegex)) {
+    const iA = findCanonicalSurahIndex(m[1]);
+    const iB = findCanonicalSurahIndex(m[2]);
+    if (iA >= 0 && iB >= 0) {
+      if (iA === 0 && iB > 0) {
+        addName(`Surah ${CANONICAL_SURAHS[0].name} (1)`);
+        for (let k = CANONICAL_SURAHS.length - 1; k >= iB; k--) {
+          addName(`Surah ${CANONICAL_SURAHS[k].name} (${CANONICAL_SURAHS[k].num})`);
+        }
+      } else {
+        const step = iA <= iB ? 1 : -1;
+        for (let k = iA; step > 0 ? k <= iB : k >= iB; k += step) {
+          addName(`Surah ${CANONICAL_SURAHS[k].name} (${CANONICAL_SURAHS[k].num})`);
+        }
+      }
+    }
+  }
+
+  // Also parse explicit line/comma/plus separated surahs (do not swallow newlines)
+  const parts = raw.split(/[,+\n&]+|\band\b/i);
+  for (const part of parts) {
+    const rMatch = new RegExp(rangeRegex.source, 'i').exec(part);
+    if (rMatch && findCanonicalSurahIndex(rMatch[1]) >= 0 && findCanonicalSurahIndex(rMatch[2]) >= 0) {
+      continue;
+    }
+    const idx = findCanonicalSurahIndex(part);
+    if (idx >= 0) {
+      const s = CANONICAL_SURAHS[idx];
+      addName(`Surah ${s.name} (${s.num})`);
+    }
+  }
+
+  return collected;
+}
+
+function parseDailySurahCount(quota: string): number | null {
+  const lower = quota.toLowerCase();
+  if (/one\s+small.*one\s+big/i.test(lower)) return 2;
+  if (/\bone\s+surah\b|\b1\s+surah\b|\b1\s+page\b/i.test(lower)) return 1;
+  const m = /(\d+)\s*(?:small|short|big|long)?\s*(?:surahs?|short\s*surahs?|small\b)/i.exec(lower);
+  if (m) return Number(m[1]);
+  const w = extractNumberToken(lower);
+  if (w !== null && /(?:surah|small|big|short|long)/i.test(lower)) return Math.round(w);
   const numOnly = /^(\d+)$/.exec(quota.trim());
   if (numOnly) return Number(numOnly[1]);
   return null;
 }
 
-function splitTajweedRules(raw: string): string[] {
-  if (!isMeaningful(raw)) return [];
-  const norm = raw
-    .replace(/[\n•]+/g, ',')
-    .replace(/\+/g, ',')
-    .replace(/\band\b/gi, ',');
-  const parts = norm
-    .split(',')
+const ARABIC_LETTERS_17 = [
+  'Alif', 'Baa', 'Taa', 'Thaa', 'Jeem', 'Haa', 'Khaa', 'Daal', 'Dhaal',
+  'Raa', 'Zaa', 'Seen', 'Sheen', 'Saad', 'Daad', 'Taa (heavy)', 'Zhuaa',
+];
+const ARABIC_LETTERS_28 = [
+  'Alif', 'Baa', 'Taa', 'Thaa', 'Jeem', 'Haa', 'Khaa', 'Daal', 'Dhaal',
+  'Raa', 'Zaa', 'Seen', 'Sheen', 'Saad', 'Daad', 'Taa', 'Zhuaa', 'Ayn',
+  'Ghayn', 'Faa', 'Qaaf', 'Kaaf', 'Laam', 'Meem', 'Noon', 'Waw', 'Haa', 'Yaa',
+];
+
+function parseJuzRange(raw: string): { startJuz: number; endJuz: number } | null {
+  const lower = raw.toLowerCase();
+  if (/\bjuz\s*amma\b|\bjuzz\s*amma\b/i.test(lower)) {
+    return { startJuz: 30, endJuz: 30 };
+  }
+  const ampMatch = /\bjuzz?\s*(\d+)\s*(?:&|,|and)\s*(\d+)\b/i.exec(lower);
+  if (ampMatch) {
+    return { startJuz: Number(ampMatch[1]), endJuz: Number(ampMatch[2]) };
+  }
+  const rangeMatch = /\b(?:juzz?|para)\s*(\d+)\s*(?:-|–|to|until)\s*(?:juzz?|para)?\s*(\d+)\b/i.exec(lower);
+  if (rangeMatch) {
+    return { startJuz: Number(rangeMatch[1]), endJuz: Number(rangeMatch[2]) };
+  }
+  const uptoMatch = /\b(?:juzz?|para)\s*(\d+)\s*(?:upto|up to|until)\b/i.exec(lower);
+  if (uptoMatch) {
+    return { startJuz: 1, endJuz: Number(uptoMatch[1]) };
+  }
+  const quarterMatch = /\(\s*(\d+)\s*juz\s*\).*?(\d+)\b/i.exec(lower);
+  if (quarterMatch) {
+    return { startJuz: Number(quarterMatch[1]), endJuz: Number(quarterMatch[2]) };
+  }
+  return null;
+}
+
+function formatJuzPageSlice(startJuz: number, endJuz: number, sliceOffset: number, count: number): string {
+  const pagesPerJuz = startJuz === 30 && endJuz === 30 ? 24 : 20;
+  const totalPages = (endJuz - startJuz + 1) * pagesPerJuz;
+  const isWrap = sliceOffset >= totalPages;
+  const s = sliceOffset % totalPages;
+  const e = Math.min(totalPages - 1, s + Math.max(1, count) - 1);
+  const sJuz = startJuz + Math.floor(s / pagesPerJuz);
+  const sPg = (s % pagesPerJuz) + 1;
+  const eJuz = startJuz + Math.floor(e / pagesPerJuz);
+  const ePg = (e % pagesPerJuz) + 1;
+  const prefix = isWrap ? 'Recap ' : '';
+  if (startJuz === 30 && endJuz === 30) {
+    return `${prefix}${sPg === ePg ? `Juz 'Amma Page ${sPg}` : `Juz 'Amma Pages ${sPg}–${ePg}`}`;
+  }
+  if (sJuz === eJuz) {
+    return `${prefix}${sPg === ePg ? `Juz ${sJuz} · Page ${sPg}` : `Juz ${sJuz} · Pages ${sPg}–${ePg}`}`;
+  }
+  return `${prefix}Juz ${sJuz} Pg ${sPg} – Juz ${eJuz} Pg ${ePg}`;
+}
+
+function parseDuasBreakdown(raw: string): string[] {
+  const cleaned = raw.trim();
+  if (!isMeaningful(cleaned)) return [];
+  const lower = cleaned.toLowerCase();
+
+  if (lower.includes('every student on different')) {
+    return ['Personal Dua (1 Dua/day)'];
+  }
+
+  const pageNums = parseNumberSet(cleaned);
+  if (pageNums.length >= 2 && !/year\s*\d/i.test(cleaned)) {
+    return pageNums.map((p) => `Duas Page ${p}`);
+  }
+
+  const items: string[] = [];
+  const recRange = /\breception\s*(?:-|–|to)\s*(?:year|yr)\s*(\d+)/i.exec(cleaned);
+  if (recRange) {
+    items.push('Reception Duas');
+    const maxYr = Number(recRange[1]);
+    for (let y = 1; y <= maxYr; y++) items.push(`Year ${y} Duas`);
+  }
+
+  const yrRange = /\byear\s*(\d+)\s*(?:&|\band\b|-)\s*(\d+)/i.exec(cleaned);
+  if (yrRange) {
+    for (let y = Number(yrRange[1]); y <= Number(yrRange[2]); y++) {
+      if (!items.includes(`Year ${y} Duas`)) items.push(`Year ${y} Duas`);
+    }
+  }
+  const singleYrs = cleaned.matchAll(/\b(?:year|yr)\s*(\d+)\b/gi);
+  for (const m of singleYrs) {
+    const label = `Year ${m[1]} Duas`;
+    if (!items.includes(label)) items.push(label);
+  }
+  if (/reception/i.test(lower) && !items.includes('Reception Duas')) {
+    items.unshift('Reception Duas');
+  }
+  if (/until\s*(?:yr|year)\s*(\d+)/i.test(lower)) {
+    const m = /until\s*(?:yr|year)\s*(\d+)/i.exec(lower);
+    if (m) {
+      const maxY = Number(m[1]);
+      items.length = 0;
+      items.push('Reception Duas');
+      for (let y = 1; y <= maxY; y++) items.push(`Year ${y} Duas`);
+    }
+  }
+  if (/kalimah/i.test(lower)) {
+    items.push('Kalimahs (1–4)');
+  }
+  if (/dua\s*number\s*(\d+)/i.test(lower)) {
+    const m = /dua\s*number\s*(\d+)/i.exec(lower);
+    if (m) {
+      const n = Number(m[1]);
+      const hasNamesToAliyyu = /99\s*names|aliyyu/i.test(lower);
+      const blocks = Math.ceil(n / 2);
+      for (let b = 0; b < blocks; b++) {
+        const d1 = b * 2 + 1;
+        const d2 = Math.min(n, d1 + 1);
+        const duaPart = d1 === d2 ? `Dua ${d1}` : `Duas ${d1}–${d2}`;
+        if (hasNamesToAliyyu) {
+          const nStart = b * 4 + 1;
+          const nEnd = Math.min(37, (b + 1) * 4);
+          const namesLabel = nStart === nEnd ? `Name ${nStart}` : `Names ${nStart}–${nEnd}`;
+          items.push(nStart <= 37 ? `${duaPart} · ${namesLabel}` : duaPart);
+        } else {
+          items.push(duaPart);
+        }
+      }
+    }
+  } else if (/99\s*names|allah'?s\s*name|40\s*names/i.test(lower)) {
+    const countMatch = /(\d+)\s*names/i.exec(lower);
+    const totalNames = countMatch ? Number(countMatch[1]) : 99;
+    const step = totalNames <= 40 ? 10 : 15;
+    for (let i = 1; i <= totalNames; i += step) {
+      items.push(`Names of Allah ${i}–${Math.min(totalNames, i + step - 1)}`);
+    }
+  }
+
+  if (items.length > 0) return items;
+  return cleaned
+    .split(/\n+/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 1 && !EMPTY_VALUES.has(s.toLowerCase()));
-  return parts.length > 0 ? parts : [raw.trim()];
+    .filter((s) => isMeaningful(s));
 }
 
 function parseAqaaidSections(raw: string): Array<{ title: string; start: number; end: number }> {
@@ -299,9 +711,9 @@ function makeTask(
 }
 
 /**
- * Generates a personalised day-by-day revision schedule from teacher inputs for any custom date range.
- * Respects explicit weekday/weekend teacher rules (e.g. Saliha Patel, Apa Habiba F, Apa Fatima Booster)
- * and divides page ranges / topics cleanly across the available days.
+ * Generates a personalised day-by-day revision schedule with ONLY broken-down daily targets
+ * (page numbers, juz/para slices, surah numbers, ayah blocks, lesson numbers, or rule focus).
+ * Exam target notes stay outside the tracker.
  */
 export function generateDailySchedule(
   slug: string,
@@ -310,16 +722,46 @@ export function generateDailySchedule(
   range: DateRange
 ): RevisionDay[] {
   const days = enumerateDates(range);
-  const totalDays = days.length;
+  const weekdaySlots = days.filter((d) => d.dow >= 1 && d.dow <= 5);
+  const totalWorkdays = Math.max(1, weekdaySlots.length > 0 ? weekdaySlots.length : days.length);
+
+  // Assign continuous 0..totalWorkdays-1 indices to weekdays so Mon-Fri schedules never skip pages
+  let runningWorkIdx = 0;
+  const daySlotIndices = days.map((d, idx) => {
+    if (weekdaySlots.length === 0) return { isWeekend: false, slotIdx: idx };
+    if (d.dow >= 1 && d.dow <= 5) {
+      const slot = runningWorkIdx;
+      runningWorkIdx++;
+      return { isWeekend: false, slotIdx: slot };
+    }
+    return { isWeekend: true, slotIdx: Math.max(0, runningWorkIdx - 1) };
+  });
+
   const tajweedList = splitTajweedRules(targets.tajweedMakhraj);
-  const quranPages = parsePageRange(targets.quranOrQaidah);
+  const quranNums = parseNumberSet(targets.quranOrQaidah, trackType === 'Qaidah');
   const dailyQuranPages = parseDailyPageCount(targets.quranDailyQuota);
+  const juzRange = parseJuzRange(targets.quranOrQaidah);
   const isNote = targets.islamicStudies.revisionPlanNote;
   const surahNote = `${targets.surahTargets}\n${targets.surahDailyQuota}`;
   const groups = detectGroups(targets);
 
-  // Collect structured Islamic Studies subjects that have real targets
-  const subjectEntries: Array<{ name: string; target: string; pages: { start: number; end: number } | null }> = [];
+  const expandedSurahs = isMeaningful(targets.surahTargets)
+    ? expandSurahList(targets.surahTargets)
+    : [];
+  const dailySurahCount = parseDailySurahCount(targets.surahDailyQuota);
+  const allSuratsEveryDay = /all\s+surat/i.test(targets.surahDailyQuota);
+  const hasKahfFirst10 =
+    /(?:kahaf?|kahf).*first\s*(?:10|&\s*last\s*10|and\s*last\s*10)|first\s*10.*(?:kahaf?|kahf)/i.test(
+      targets.surahTargets
+    );
+  const hasKahfFirst12 = /first\s*12.*khaf|(?:kahaf?|kahf).*12/i.test(targets.surahTargets);
+  const hasKahfLast10 =
+    /last\s*10.*(?:kahaf?|kahf)|(?:kahaf?|kahf).*last\s*10/i.test(targets.surahTargets);
+  const hasMulkExtra = /surah\s*mulk/i.test(targets.surahTargets);
+  const hasBaqarahLast2 = /baqarah\s*last\s*2/i.test(targets.surahTargets);
+  const hasHashrLast3 = /hashr\s*last\s*3/i.test(targets.surahTargets);
+
+  // Structured Islamic Studies subjects
   const isTargets = targets.islamicStudies;
   const rawSubjects: Array<[string, string]> = [
     ['Fiqh', isTargets.fiqh],
@@ -330,13 +772,43 @@ export function generateDailySchedule(
     ['Islamic History', isTargets.islamicHistory],
     ['Akhlaaq', isTargets.akhlaaq],
   ];
+  const subjectEntries: Array<{
+    name: string;
+    target: string;
+    pageNums: number[];
+    lessons: { start: number; end: number } | null;
+  }> = [];
   for (const [name, val] of rawSubjects) {
     if (isMeaningful(val)) {
-      subjectEntries.push({ name, target: cleanCell(val), pages: parsePageRange(val) });
+      const cleaned = cleanCell(val);
+      const lessonM = /\b(?:lesson|topic)\s*(\d+)\s*(?:-|–|to)\s*(\d+)/i.exec(cleaned);
+      subjectEntries.push({
+        name,
+        target: cleaned,
+        pageNums: parseNumberSet(cleaned, false),
+        lessons: lessonM ? { start: Number(lessonM[1]), end: Number(lessonM[2]) } : null,
+      });
     }
   }
 
-  // Check for explicit weekday rules in teacher's Islamic Studies plan
+  // Precompute per-subject appearance counters across all weekdays so every subject advances sequentially with zero repeats
+  const subTotalAppearances: number[] = subjectEntries.map(() => 0);
+  const subDaySlots: Array<{ primaryIdx: number; primaryApp: number; secondaryIdx: number; secondaryApp: number }> = [];
+  if (subjectEntries.length > 0) {
+    const N = subjectEntries.length;
+    for (let w = 0; w < totalWorkdays; w++) {
+      const pIdx = w % N;
+      const pApp = subTotalAppearances[pIdx]++;
+      let sIdx = -1;
+      let sApp = 0;
+      if (N > 1) {
+        sIdx = (w + 1) % N;
+        sApp = subTotalAppearances[sIdx]++;
+      }
+      subDaySlots.push({ primaryIdx: pIdx, primaryApp: pApp, secondaryIdx: sIdx, secondaryApp: sApp });
+    }
+  }
+
   const hasSalihaStyleSchedule =
     /monday\s*[-–]/i.test(isNote) && /tuesday\s*[-–]/i.test(isNote) && /wednesday\s*[-–]/i.test(isNote);
   const hasHabibaStyleSchedule =
@@ -345,78 +817,166 @@ export function generateDailySchedule(
   const hasWeekendSajdah = /sajdah.*saturday.*sunday/i.test(surahNote.replace(/\n/g, ' '));
   const aqaaidSections = parseAqaaidSections(isTargets.aqaaid);
 
-  // Pre-build 5-pages-per-day chunk list when Aqaaid has detailed multi-section page blocks (e.g. Class 9)
   const aqaaidChunks: string[] = [];
   if (aqaaidSections.length > 0) {
-    const step = dailyQuranPages && dailyQuranPages > 0 ? dailyQuranPages : 5;
+    const isDailyPages = parseDailyPageCount(isTargets.revisionPlanNote);
+    const step = isDailyPages && isDailyPages > 0 ? isDailyPages : 5;
     for (const sec of aqaaidSections) {
       for (let p = sec.start; p <= sec.end; p += step) {
         const endP = Math.min(p + step - 1, sec.end);
-        aqaaidChunks.push(`${sec.title}: pages ${p}–${endP}`);
+        aqaaidChunks.push(
+          p === endP ? `${sec.title}: Page ${p}` : `${sec.title}: Pages ${p}–${endP}`
+        );
       }
     }
   }
 
+  const duaChunks = parseDuasBreakdown(isTargets.duas);
+
   return days.map((day, idx) => {
+    const { isWeekend, slotIdx } = daySlotIndices[idx];
     const tasks: RevisionTask[] = [];
     let seq = 1;
 
-    // 1. Quran / Juzz Amma / Qaidah daily block
+    // 1. Quran / Juzz 'Amma / Qaidah broken-down daily numbers
     if (trackType !== 'Islamic Studies Only' && isMeaningful(targets.quranOrQaidah)) {
-      let detail = targets.quranOrQaidah;
-      if (quranPages) {
-        const totalP = quranPages.end - quranPages.start + 1;
-        const perDay = dailyQuranPages ?? Math.max(1, Math.ceil(totalP / Math.max(1, totalDays - 2)));
-        const sliceStart = quranPages.start + ((idx * perDay) % totalP);
-        const sliceEnd = Math.min(quranPages.end, sliceStart + perDay - 1);
-        const passNum = Math.floor((idx * perDay) / totalP) + 1;
-        detail = `Pages ${sliceStart}–${sliceEnd} (Pass ${passNum} · Target: ${targets.quranOrQaidah})`;
-      } else if (isMeaningful(targets.quranDailyQuota)) {
-        detail = `${targets.quranDailyQuota} · Scope: ${targets.quranOrQaidah}`;
-      }
+      const qLower = targets.quranOrQaidah.toLowerCase();
       const label =
         trackType === 'Qaidah'
           ? 'Qaidah Reading'
           : trackType === "Juzz 'Amma"
             ? "Juzz 'Amma Reading"
             : 'Quran / Panj Para Reading';
+      let detail = '';
+
+      if (qLower.includes('alif to zhuaa')) {
+        const perDay = 2;
+        const s = (slotIdx * perDay) % ARABIC_LETTERS_17.length;
+        const e = Math.min(ARABIC_LETTERS_17.length - 1, s + perDay - 1);
+        detail = `Page 4 · Letters ${ARABIC_LETTERS_17[s]} – ${ARABIC_LETTERS_17[e]}`;
+      } else if (qLower.includes('alif to yaa') || /letters?\s*أ/i.test(qLower)) {
+        const perDay = 3;
+        const s = (slotIdx * perDay) % ARABIC_LETTERS_28.length;
+        const e = Math.min(ARABIC_LETTERS_28.length - 1, s + perDay - 1);
+        detail =
+          s === e
+            ? `Letter ${s + 1}: ${ARABIC_LETTERS_28[s]}`
+            : `Letters ${s + 1}–${e + 1}: ${ARABIC_LETTERS_28[s]} – ${ARABIC_LETTERS_28[e]}`;
+      } else if (qLower.includes('surah duha') && qLower.includes('a’laa') || (qLower.includes('duha') && qLower.includes('alaa'))) {
+        // Surahs 93 back to 87 (142 ayahs total)
+        const surahAyahs: Array<[string, number]> = [
+          ['Ad-Duha', 11],
+          ['Al-Layl', 21],
+          ['Ash-Shams', 15],
+          ['Al-Balad', 20],
+          ['Al-Fajr', 30],
+          ['Al-Ghashiyah', 26],
+          ["Al-A'la", 19],
+        ];
+        const totalAyahs = surahAyahs.reduce((acc, s) => acc + s[1], 0);
+        const perDay = 10;
+        const startGlobal = (slotIdx * perDay) % totalAyahs;
+        const endGlobal = Math.min(totalAyahs - 1, startGlobal + perDay - 1);
+        const parts: string[] = [];
+        let cursor = 0;
+        for (const [sName, count] of surahAyahs) {
+          const sEnd = cursor + count - 1;
+          if (endGlobal >= cursor && startGlobal <= sEnd) {
+            const fromAyah = Math.max(1, startGlobal - cursor + 1);
+            const toAyah = Math.min(count, endGlobal - cursor + 1);
+            parts.push(`${sName}: Ayahs ${fromAyah}–${toAyah}`);
+          }
+          cursor += count;
+        }
+        detail = isWeekend ? `Recap ${parts.join(' · ')}` : parts.join(' & ');
+      } else if (qLower.includes('ma’idah') || qLower.includes('maidah')) {
+        // Surah Al-Ma'idah (120 ayahs) + Al-An'am (1-41) = 161 ayahs
+        const totalAyahs = 161;
+        const perDay = Math.ceil(totalAyahs / totalWorkdays);
+        const startA = (slotIdx * perDay) % totalAyahs;
+        const endA = Math.min(totalAyahs - 1, startA + perDay - 1);
+        if (endA < 120) {
+          detail = `Surah Al-Ma'idah: Ayahs ${startA + 1}–${endA + 1}`;
+        } else if (startA >= 120) {
+          detail = `Surah Al-An'am: Ayahs ${startA - 120 + 1}–${endA - 120 + 1}`;
+        } else {
+          detail = `Al-Ma'idah ${startA + 1}–120 & Al-An'am 1–${endA - 120 + 1}`;
+        }
+      } else if (quranNums.length >= 2) {
+        const perDay = dailyQuranPages ?? Math.max(1, Math.ceil(quranNums.length / totalWorkdays));
+        const rawStart = Math.floor(slotIdx * perDay);
+        const rawEnd = Math.max(rawStart, Math.floor((slotIdx + 1) * perDay) - 1);
+        const span = Math.max(1, rawEnd - rawStart + 1);
+        if (rawStart < quranNums.length) {
+          const endIdx = Math.min(quranNums.length - 1, rawEnd);
+          const slice = quranNums.slice(rawStart, endIdx + 1);
+          const formatted = formatPageNumbers(slice);
+          detail = isWeekend ? `Recap ${formatted}` : formatted;
+        } else {
+          const wrapStart = rawStart % quranNums.length;
+          const wrapEnd = Math.min(quranNums.length - 1, wrapStart + span - 1);
+          const slice = quranNums.slice(wrapStart, wrapEnd + 1);
+          detail = `Recap ${formatPageNumbers(slice)}`;
+        }
+      } else if (juzRange) {
+        if (/ruku/i.test(targets.quranDailyQuota)) {
+          const rukuCount = parseDailyPageCount(targets.quranDailyQuota) ?? 3;
+          const totalRukus = 36;
+          const startR = ((slotIdx * rukuCount) % totalRukus) + 1;
+          const endR = Math.min(totalRukus, startR + rukuCount - 1);
+          const juzNum = juzRange.startJuz + Math.floor((startR - 1) / 16);
+          const localStart = ((startR - 1) % 16) + 1;
+          const localEnd = localStart + (endR - startR);
+          detail = `Juz ${juzNum} · Rukus ${localStart}–${localEnd}`;
+        } else {
+          const pagesPerJuz = juzRange.startJuz === 30 && juzRange.endJuz === 30 ? 24 : 20;
+          const totalJuzPages = (juzRange.endJuz - juzRange.startJuz + 1) * pagesPerJuz;
+          const perDay =
+            dailyQuranPages && !/1\s*side/i.test(targets.quranDailyQuota)
+              ? dailyQuranPages
+              : Math.max(2, Math.ceil(totalJuzPages / totalWorkdays));
+          detail = formatJuzPageSlice(juzRange.startJuz, juzRange.endJuz, slotIdx * perDay, perDay);
+        }
+      } else {
+        const perDay = dailyQuranPages ?? 2;
+        const startP = slotIdx * perDay + 1;
+        const endP = startP + perDay - 1;
+        detail = startP === endP ? `Page ${startP}` : `Pages ${startP}–${endP}`;
+      }
+
       tasks.push(makeTask(slug, day.dayIndex, seq++, 'quran', label, detail));
     }
 
-    // 2. Tajweed + Makhraj daily focus (rotate rules cleanly so ADHD learners focus on 1-2 rules/day)
+    // 2. Tajweed + Makhraj daily rule focus (pure rule name, no filler prose)
     if (tajweedList.length > 0 && trackType !== 'Islamic Studies Only') {
-      const ruleA = tajweedList[idx % tajweedList.length];
-      const ruleB = tajweedList.length > 2 ? tajweedList[(idx + 1) % tajweedList.length] : null;
+      const ruleA = tajweedList[slotIdx % tajweedList.length];
+      const ruleB = tajweedList.length > 3 ? tajweedList[(slotIdx + 1) % tajweedList.length] : null;
       const focus = ruleB && ruleB !== ruleA ? `${ruleA} & ${ruleB}` : ruleA;
-      tasks.push(
-        makeTask(
-          slug,
-          day.dayIndex,
-          seq++,
-          'tajweed',
-          'Tajweed & Makhraj Focus',
-          `Apply ${focus} carefully during today's recitation.`
-        )
-      );
+      tasks.push(makeTask(slug, day.dayIndex, seq++, 'tajweed', 'Tajweed & Makhraj', focus));
     }
 
-    // 3. Surahs & Memorisation block
+    // 3. Surahs broken down into daily numbers / Surah names
     if (isMeaningful(targets.surahTargets) && trackType !== 'Islamic Studies Only') {
       if (hasThursdayFridayKahf || hasWeekendSajdah) {
-        const extraParts: string[] = ['Surah Mulk + Surah Yaseen + 4 Juz Amma Surahs'];
+        const extraParts: string[] = ['Surah Al-Mulk · Surah Yaseen'];
+        const juzSlice = expandedSurahs.length > 0
+          ? expandedSurahs.slice((slotIdx * 4) % expandedSurahs.length, ((slotIdx * 4) % expandedSurahs.length) + 4)
+          : ['4 Juz Amma Surahs'];
+        extraParts.push(juzSlice.join(', '));
         if (day.dow === 4 || day.dow === 5) {
-          extraParts.push('Surah Baqarah (last page) & Surah Kahf (1st & last 10 ayahs)');
+          extraParts.push('Baqarah (Last Page) & Kahf (First/Last 10 Ayahs)');
         }
         if (day.dow === 0 || day.dow === 6) {
-          extraParts.push('Surah Sajdah');
+          extraParts.push('Surah As-Sajdah');
         }
         tasks.push(
-          makeTask(slug, day.dayIndex, seq++, 'surah', 'Surah Memorisation', extraParts.join(' · '))
+          makeTask(slug, day.dayIndex, seq++, 'surah', 'Surah Revision', extraParts.join(' · '))
         );
-      } else {
-        const quota = isMeaningful(targets.surahDailyQuota)
-          ? targets.surahDailyQuota
-          : 'Revise target surahs';
+      } else if (/reception\s*to\s*year\s*9/i.test(targets.surahTargets)) {
+        // Class 9 style "5 short surahs and 1 ruku"
+        const baseShort = expandedSurahs.length > 0 ? expandedSurahs : CANONICAL_SURAHS.slice(16).map((s) => `Surah ${s.name}`);
+        const sStart = (slotIdx * 5) % baseShort.length;
+        const slice = Array.from({ length: 5 }, (_, k) => baseShort[(sStart + k) % baseShort.length]);
         tasks.push(
           makeTask(
             slug,
@@ -424,32 +984,100 @@ export function generateDailySchedule(
             seq++,
             'surah',
             'Surah Revision',
-            `${quota} · From: ${targets.surahTargets.replace(/\n/g, ', ')}`
+            `${slice[0]} – ${slice[slice.length - 1]} (5) · 1 Long Ruku`
+          )
+        );
+      } else if (expandedSurahs.length > 0) {
+        const perDay = allSuratsEveryDay
+          ? Math.max(2, Math.ceil(expandedSurahs.length / totalWorkdays))
+          : dailySurahCount ?? Math.max(1, Math.ceil(expandedSurahs.length / totalWorkdays));
+        const startIdx = (slotIdx * perDay) % expandedSurahs.length;
+        const slice = expandedSurahs.slice(startIdx, startIdx + perDay);
+        const surahText =
+          slice.length <= 2
+            ? slice.join(' & ')
+            : `${slice[0]} – ${slice[slice.length - 1]} (${slice.length} Surahs)`;
+
+        const extras: string[] = [surahText];
+        if (hasKahfFirst10) {
+          const half = slotIdx % 2 === 0 ? 'Kahf Ayahs 1–5' : 'Kahf Ayahs 6–10';
+          extras.push(hasKahfLast10 ? `${half} & Last 10` : half);
+        } else if (hasKahfFirst12) {
+          extras.push(slotIdx % 2 === 0 ? 'Kahf Ayahs 1–6' : 'Kahf Ayahs 7–12');
+        }
+        if (hasMulkExtra && !surahText.includes('Mulk')) {
+          if (slotIdx % 3 === 0) extras.push('Surah Al-Mulk (Part 1)');
+          else if (slotIdx % 3 === 1) extras.push('Surah Al-Mulk (Part 2)');
+          else extras.push('Surah Al-Mulk (Full)');
+        }
+        if (hasBaqarahLast2 && slotIdx % 2 === 0) {
+          extras.push('Al-Baqarah (Last 2 Ayahs)');
+        }
+        if (hasHashrLast3 && slotIdx % 2 === 1) {
+          extras.push('Al-Hashr (Last 3 Ayahs)');
+        }
+
+        tasks.push(
+          makeTask(slug, day.dayIndex, seq++, 'surah', 'Surah Revision', extras.join(' · '))
+        );
+      } else {
+        tasks.push(
+          makeTask(
+            slug,
+            day.dayIndex,
+            seq++,
+            'surah',
+            'Surah Revision',
+            `${
+              dailySurahCount
+                ? `${dailySurahCount} ${dailySurahCount === 1 ? 'Surah' : 'Surahs'}`
+                : '1–2 Surahs'
+            }`
           )
         );
       }
     }
 
-    // 4. Islamic Studies & Duas block
+    // 4. Islamic Studies & Duas broken down into concrete numbers / slices
     if (isTargets.enabled) {
       if (groups.length > 0) {
-        // Booster Group 1 & Group 2 structured tasks
-        const isWeekend = day.dow === 0 || day.dow === 6;
-        const g1Topics = ['Fiqh: Rulings to Wudhu (Book 4)', 'Aqaaid: Imaan to Holy Books (Book 4)', 'Life of Prophet s.a.w (Half Book)', 'Akhlaaq/Adaab: Eating & Drinking to Sabr'];
-        const g2FiqhAqaaid = ['Water & Impurities (Book 6)', 'Maturity & Ghusl (Book 6)', 'Ahlus Sunnah & Nabawiyyat', 'Sahabahs & Asharah Mubasharah'];
-        const g2Sirah = ['Shamaa’il (Week 1)', 'Abu Bakr r.a & his life (Weeks 2–4)'];
-        const g2Tarikh = ['Prophet Dawud a.s', 'Prophet Suleyman a.s', 'Prophet Yunus a.s'];
-        const g2Akhlaaq = ['Oppression & Bullying', 'Envy & Ghibah', 'Pride & Sunnah'];
+        const g1Topics = [
+          'Fiqh Book 4: Topics 1–2 (Rulings & Cleanliness)',
+          'Fiqh Book 4: Topics 3–4 (Wudhu)',
+          'Aqaaid Book 4: Topics 1–2 (Imaan & Angels)',
+          'Aqaaid Book 4: Topics 3–4 (Holy Books)',
+          'Sirah Book: Part 1 (Chapters 1–3)',
+          'Sirah Book: Part 2 (Chapters 4–6)',
+          'Akhlaaq Book 4: Topics 1–2 (Eating & Drinking)',
+          'Akhlaaq Book 4: Topics 3–4 (Sabr)',
+        ];
+        const g2FiqhAqaaid = [
+          'Fiqh Book 6: Water & Impurities',
+          'Fiqh Book 6: Maturity & Ghusl',
+          'Aqaaid Book 6: Ahlus Sunnah & Nabawiyyat',
+          'Aqaaid Book 6: Sahabahs & Asharah Mubasharah',
+        ];
+        const g2Sirah = ["Sirah Book 6: Shamaa'il", 'Sirah Book 6: Abu Bakr (r.a)'];
+        const g2Tarikh = [
+          'Tarikh: Prophet Dawud (a.s)',
+          'Tarikh: Prophet Suleyman (a.s)',
+          'Tarikh: Prophet Yunus (a.s)',
+        ];
+        const g2Akhlaaq = [
+          'Akhlaaq: Oppression & Bullying',
+          'Akhlaaq: Envy & Ghibah',
+          'Akhlaaq: Pride & Sunnah',
+        ];
 
-        const weekIdx = Math.floor(idx / 7);
+        const weekIdx = Math.floor(slotIdx / 5);
         tasks.push(
           makeTask(
             slug,
             day.dayIndex,
             seq++,
             'islamic-studies',
-            isWeekend ? 'Group 1: Weekend 2-Topic Review' : 'Group 1: Daily Topic Revision',
-            `${g1Topics[idx % g1Topics.length]} — read notes & self-quiz`,
+            isWeekend ? 'Group 1: Recap (2 Topics)' : 'Group 1: Topic Revision',
+            g1Topics[slotIdx % g1Topics.length],
             'Group 1'
           )
         );
@@ -459,8 +1087,8 @@ export function generateDailySchedule(
             day.dayIndex,
             seq++,
             'islamic-studies',
-            'Group 2: Fiqh & Aqaaid Focus',
-            g2FiqhAqaaid[idx % g2FiqhAqaaid.length],
+            'Group 2: Fiqh & Aqaaid',
+            g2FiqhAqaaid[slotIdx % g2FiqhAqaaid.length],
             'Group 2'
           )
         );
@@ -471,56 +1099,74 @@ export function generateDailySchedule(
             seq++,
             'islamic-studies',
             'Group 2: Sirah, Tarikh & Akhlaaq',
-            `${g2Sirah[Math.min(weekIdx, 1)]} · Tarikh: ${g2Tarikh[weekIdx % g2Tarikh.length]} · Akhlaaq: ${g2Akhlaaq[idx % g2Akhlaaq.length]}`,
+            `${g2Sirah[Math.min(weekIdx, 1)]} · ${g2Tarikh[weekIdx % g2Tarikh.length]} · ${g2Akhlaaq[slotIdx % g2Akhlaaq.length]}`,
             'Group 2'
           )
         );
-        if (isMeaningful(isTargets.duas)) {
+        if (duaChunks.length > 0) {
           tasks.push(
-            makeTask(slug, day.dayIndex, seq++, 'duas', 'Personal Dua Target', isTargets.duas)
+            makeTask(
+              slug,
+              day.dayIndex,
+              seq++,
+              'duas',
+              'Daily Dua',
+              duaChunks[slotIdx % duaChunks.length]
+            )
           );
         }
       } else if (hasSalihaStyleSchedule) {
-        // Explicit Mon-Fri teacher timetable + Weekend consolidation
+        const fiqhNums = parseNumberSet(isTargets.fiqh);
+        const aqNums = parseNumberSet(isTargets.aqaaid);
+        const sirahNums = parseNumberSet(isTargets.seerah);
+        const weekOffset = Math.floor(slotIdx / 5);
+
+        const sliceForWeek = (nums: number[], fallback: string) => {
+          if (nums.length < 2) return fallback;
+          const half = Math.ceil(nums.length / 2);
+          const slice = nums.slice((weekOffset % 2) * half, ((weekOffset % 2) + 1) * half);
+          return formatPageNumbers(slice.length > 0 ? slice : nums);
+        };
+
         const mapByDow: Record<number, { cat: TaskCategory; title: string; detail: string }> = {
           1: {
             cat: 'duas',
-            title: 'Monday Duas & Meanings',
-            detail: `Revise Duas (${isTargets.duas || 'Reception to Year 7 with meaning'})`,
+            title: 'Monday Duas',
+            detail: duaChunks.length > 0 ? duaChunks[weekOffset % duaChunks.length] : 'Reception – Year 3 Duas',
           },
           2: {
             cat: 'islamic-studies',
-            title: 'Tuesday Fiqh & 99 Names',
-            detail: `${isTargets.fiqh || 'Fiqh target pages'} + 99 Names of Allah`,
+            title: 'Tuesday Fiqh & Names',
+            detail: `${sliceForWeek(fiqhNums, 'Fiqh Pages 28–37')} · 99 Names (${weekOffset % 2 === 0 ? '1–50' : '51–99'})`,
           },
           3: {
             cat: 'islamic-studies',
             title: 'Wednesday Shamail & Sirah',
-            detail: isTargets.seerah || 'Shamail & Sirah target pages',
+            detail: sliceForWeek(sirahNums, 'Pages 82–92'),
           },
           4: {
             cat: 'islamic-studies',
             title: 'Thursday Aqaaid & Duas',
-            detail: `${isTargets.aqaaid || 'Aqaaid target pages'} + daily Dua review`,
+            detail: `${sliceForWeek(aqNums, 'Pages 132–146')} · ${duaChunks[(weekOffset + 2) % Math.max(1, duaChunks.length)] || 'Year 4–7 Duas'}`,
           },
           5: {
             cat: 'islamic-studies',
             title: 'Friday Akhlaaq & Tarikh',
-            detail: 'Revise 2 pages each of Akhlaaq and Tarikh',
+            detail: `Akhlaaq: 2 Pages · Tarikh: 2 Pages`,
           },
           6: {
             cat: 'islamic-studies',
-            title: 'Saturday Self-Quiz & Recap',
-            detail: 'Test tricky topics from Mon–Fri Fiqh, Aqaaid & Sirah.',
+            title: 'Saturday Recap',
+            detail: `${sliceForWeek(fiqhNums, 'Fiqh')} · ${sliceForWeek(aqNums, 'Aqaaid')}`,
           },
           0: {
             cat: 'duas',
-            title: 'Sunday Duas & Readiness Check',
-            detail: 'Oral recap of Duas with meanings + 99 Names of Allah.',
+            title: 'Sunday Duas & Names',
+            detail: '99 Names of Allah · Duas (Years 1–7)',
           },
         };
-        const plan = mapByDow[day.dow];
-        tasks.push(makeTask(slug, day.dayIndex, seq++, plan.cat, plan.title, plan.detail));
+        const planDay = mapByDow[day.dow];
+        tasks.push(makeTask(slug, day.dayIndex, seq++, planDay.cat, planDay.title, planDay.detail));
       } else if (hasHabibaStyleSchedule) {
         if (day.dow === 1 || day.dow === 2) {
           tasks.push(
@@ -529,8 +1175,8 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'duas',
-              `${day.weekday} Dua Plan`,
-              'Year 3 Duas revision + Dua when entering shopping area'
+              `${day.weekday} Duas`,
+              day.dow === 1 ? 'Year 3 Duas (Part 1)' : 'Year 3 Duas (Part 2)'
             )
           );
           tasks.push(
@@ -539,8 +1185,8 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'islamic-studies',
-              day.dow === 1 ? 'Fiqh Revision' : 'Aqaaid Revision',
-              day.dow === 1 ? isTargets.fiqh : isTargets.aqaaid
+              day.dow === 1 ? 'Fiqh' : 'Aqaaid',
+              day.dow === 1 ? 'Page 46' : 'Page 143'
             )
           );
         } else if (day.dow === 3 || day.dow === 4) {
@@ -550,8 +1196,8 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'duas',
-              `${day.weekday} Dua Plan`,
-              'Year 4 Duas revision + meanings'
+              `${day.weekday} Duas`,
+              day.dow === 3 ? 'Year 4 Duas (Part 1)' : 'Year 4 Duas (Part 2)'
             )
           );
           tasks.push(
@@ -560,22 +1206,20 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'islamic-studies',
-              day.dow === 3 ? 'Seerah Revision' : 'Fiqh & Aqaaid Recap',
-              day.dow === 3 ? isTargets.seerah : `${isTargets.fiqh} · ${isTargets.aqaaid}`
+              day.dow === 3 ? 'Seerah' : 'Fiqh & Aqaaid',
+              day.dow === 3 ? 'Page 97' : 'Fiqh Page 46 · Aqaaid Page 143'
             )
           );
         } else if (day.dow === 5) {
-          tasks.push(
-            makeTask(slug, day.dayIndex, seq++, 'duas', 'Friday Dua Plan', 'Year 5 Duas revision')
-          );
+          tasks.push(makeTask(slug, day.dayIndex, seq++, 'duas', 'Friday Duas', 'Year 5 Duas'));
           tasks.push(
             makeTask(
               slug,
               day.dayIndex,
               seq++,
               'islamic-studies',
-              'Friday Seerah & Aqaaid Check',
-              `${isTargets.seerah} · ${isTargets.aqaaid}`
+              'Seerah & Aqaaid',
+              'Seerah Page 97 · Aqaaid Page 143'
             )
           );
         } else {
@@ -585,65 +1229,79 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'duas',
-              'Weekend Dua & Names Consolidation',
-              'Reception to Year 2 Duas + Names of Allah + Full Duas recap'
+              'Weekend Duas',
+              day.dow === 6 ? 'Reception – Year 2 Duas' : '99 Names of Allah (1–99)'
             )
           );
         }
       } else if (aqaaidChunks.length > 0) {
-        // Class 9 style multi-section pages (5 pages/day)
-        const chunk = aqaaidChunks[idx % aqaaidChunks.length];
+        const chunk = aqaaidChunks[slotIdx % aqaaidChunks.length];
         tasks.push(
-          makeTask(
-            slug,
-            day.dayIndex,
-            seq++,
-            'islamic-studies',
-            'Islamic Curriculum (5 Pages Daily)',
-            chunk
-          )
+          makeTask(slug, day.dayIndex, seq++, 'islamic-studies', 'Islamic Curriculum', chunk)
         );
         if (isMeaningful(targets.surahTargets)) {
+          const yrSlot = (slotIdx % 10);
+          const duaDetail =
+            yrSlot === 0
+              ? 'Reception Duas · Names 1–10'
+              : `Year ${yrSlot} Duas · Names ${yrSlot * 10 + 1}–${Math.min(99, (yrSlot + 1) * 10)}`;
           tasks.push(
-            makeTask(
-              slug,
-              day.dayIndex,
-              seq++,
-              'duas',
-              'Duas & Names of Allah',
-              'Revise Reception to Year 9 Duas & All Names of Allah'
-            )
+            makeTask(slug, day.dayIndex, seq++, 'duas', 'Duas & 99 Names', duaDetail)
           );
         }
       } else {
-        // Generic clean distribution across numeric page ranges or subject list
         if (subjectEntries.length > 0) {
-          // Pick 1-2 subjects per day rotating cleanly, plus page slices if numeric ranges exist
-          const primarySub = subjectEntries[idx % subjectEntries.length];
-          const secondarySub =
-            subjectEntries.length > 1
-              ? subjectEntries[(idx + 1) % subjectEntries.length]
-              : null;
+          const slotMeta = subDaySlots[slotIdx % subDaySlots.length];
+          const primarySub = subjectEntries[slotMeta.primaryIdx];
+          const secondarySub = slotMeta.secondaryIdx >= 0 ? subjectEntries[slotMeta.secondaryIdx] : null;
 
-          const formatSub = (sub: { name: string; target: string; pages: { start: number; end: number } | null }) => {
-            if (!sub.pages) return `${sub.name}: ${sub.target}`;
-            const len = sub.pages.end - sub.pages.start + 1;
-            const daysForSub = Math.max(2, Math.floor(totalDays / Math.min(subjectEntries.length, 3)));
-            const perChunk = Math.max(2, Math.ceil(len / daysForSub));
-            const offset = Math.floor(idx / subjectEntries.length) * perChunk;
-            const s = sub.pages.start + (offset % len);
-            const e = Math.min(sub.pages.end, s + perChunk - 1);
-            return `${sub.name}: Pages ${s}–${e} (Full target: ${sub.target})`;
+          const formatSubSlice = (
+            sub: (typeof subjectEntries)[number],
+            subAppearanceIdx: number,
+            totalAppearances: number
+          ): string => {
+            if (sub.pageNums.length >= 2) {
+              const total = sub.pageNums.length;
+              const startIdx = Math.floor((subAppearanceIdx * total) / Math.max(1, totalAppearances));
+              const endIdx = Math.max(
+                startIdx,
+                Math.min(total - 1, Math.floor(((subAppearanceIdx + 1) * total) / Math.max(1, totalAppearances)) - 1)
+              );
+              const slice = sub.pageNums.slice(startIdx, endIdx + 1);
+              return `${sub.name}: ${formatPageNumbers(slice)}`;
+            }
+            if (sub.lessons) {
+              const count = sub.lessons.end - sub.lessons.start + 1;
+              if (count >= totalAppearances) {
+                const sOff = Math.floor((subAppearanceIdx * count) / Math.max(1, totalAppearances));
+                const eOff = Math.max(sOff, Math.floor(((subAppearanceIdx + 1) * count) / Math.max(1, totalAppearances)) - 1);
+                const l1 = sub.lessons.start + sOff;
+                const l2 = sub.lessons.start + eOff;
+                return l1 === l2 ? `${sub.name}: Lesson ${l1}` : `${sub.name}: Lessons ${l1}–${l2}`;
+              }
+              const lessonNum = sub.lessons.start + (subAppearanceIdx % Math.max(1, count));
+              return `${sub.name}: Lesson ${lessonNum}`;
+            }
+            const totalParts = Math.max(2, totalAppearances);
+            const partNum = (subAppearanceIdx % totalParts) + 1;
+            return `${sub.name}: Part ${partNum} of ${totalParts}`;
           };
 
-          const detailParts = [formatSub(primarySub)];
+          const detailParts = [
+            formatSubSlice(
+              primarySub,
+              slotMeta.primaryApp,
+              subTotalAppearances[slotMeta.primaryIdx]
+            ),
+          ];
           if (secondarySub && secondarySub.name !== primarySub.name) {
-            detailParts.push(formatSub(secondarySub));
-          }
-          if (isNote && /15 min/i.test(isNote)) {
-            detailParts.push('Minimum 15 mins per subject');
-          } else if (isNote && /quiz/i.test(isNote) && (day.dow === 0 || day.dow === 6)) {
-            detailParts.push('Weekend mini-quiz on covered pages');
+            detailParts.push(
+              formatSubSlice(
+                secondarySub,
+                slotMeta.secondaryApp,
+                subTotalAppearances[slotMeta.secondaryIdx]
+              )
+            );
           }
 
           tasks.push(
@@ -652,7 +1310,7 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'islamic-studies',
-              'Islamic Studies Focus',
+              'Islamic Studies',
               detailParts.join(' · ')
             )
           );
@@ -663,21 +1321,21 @@ export function generateDailySchedule(
               day.dayIndex,
               seq++,
               'islamic-studies',
-              'Islamic Studies Review',
-              isNote || 'Review class chapters and worksheet questions with parent/guardian.'
+              'Islamic Studies',
+              `Unit ${(slotIdx % 5) + 1}`
             )
           );
         }
 
-        if (isMeaningful(isTargets.duas)) {
+        if (duaChunks.length > 0) {
           tasks.push(
             makeTask(
               slug,
               day.dayIndex,
               seq++,
               'duas',
-              'Daily Duas & Names Practice',
-              isTargets.duas.replace(/\n/g, ' · ')
+              'Duas & Names',
+              duaChunks[slotIdx % duaChunks.length]
             )
           );
         }

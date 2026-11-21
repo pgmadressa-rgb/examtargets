@@ -174,22 +174,20 @@ function loadStore(): StoreData {
         const needsDec1Migration =
           loadedRange.startDate === '2026-11-18' && loadedRange.endDate === '2026-12-01';
         const effectiveRange = needsDec1Migration ? { ...DEFAULT_DATE_RANGE } : loadedRange;
-        const migratedPlans = needsDec1Migration
-          ? raw.plans.map((p) =>
-              p.manuallyEdited
-                ? p
-                : {
-                    ...p,
-                    dateRange: { ...effectiveRange },
-                    dailySchedule: generateDailySchedule(
-                      p.slug,
-                      p.trackType,
-                      p.targets,
-                      effectiveRange
-                    ),
-                  }
-            )
-          : raw.plans;
+        const migratedPlans = raw.plans.map((p) => {
+          if (p.manuallyEdited) return p;
+          const nextRange = needsDec1Migration ? { ...effectiveRange } : p.dateRange;
+          return {
+            ...p,
+            dateRange: nextRange,
+            dailySchedule: generateDailySchedule(
+              p.slug,
+              p.trackType,
+              p.targets,
+              nextRange
+            ),
+          };
+        });
 
         const isUntouchedLegacySeed =
           raw.totalCsvRows === 42 &&
@@ -213,9 +211,7 @@ function loadStore(): StoreData {
           pushSubscriptions: raw.pushSubscriptions || {},
           savedTerms: raw.savedTerms || {},
         };
-        if (needsDec1Migration) {
-          fs.writeFileSync(STORE_PATH, JSON.stringify(loaded, null, 2));
-        }
+        fs.writeFileSync(STORE_PATH, JSON.stringify(loaded, null, 2));
         return loaded;
       }
     } catch {
@@ -238,10 +234,28 @@ const vapidKeys = initVapidKeys();
 
 function getRelevantTasksForTracker(plan: ClassPlan, tracker: StudentTracker) {
   const allTasks = plan.dailySchedule.flatMap((d) => d.tasks);
-  if (!tracker.selectedGroup || tracker.selectedGroup === 'All' || plan.groups.length === 0) {
-    return allTasks;
-  }
-  return allTasks.filter((t) => !t.group || t.group === tracker.selectedGroup);
+  return allTasks.filter((t) => {
+    if (t.studentTrackerId) {
+      return t.studentTrackerId === tracker.id;
+    }
+    if (!tracker.selectedGroup || tracker.selectedGroup === 'All' || plan.groups.length === 0) {
+      return true;
+    }
+    return !t.group || t.group === tracker.selectedGroup;
+  });
+}
+
+function sanitizePlanForQr(plan: ClassPlan, allowedTrackerId?: string): ClassPlan {
+  return {
+    ...plan,
+    dailySchedule: plan.dailySchedule.map((day) => ({
+      ...day,
+      tasks: day.tasks.filter((t) => {
+        if (!t.studentTrackerId) return true;
+        return Boolean(allowedTrackerId && t.studentTrackerId === allowedTrackerId);
+      }),
+    })),
+  };
 }
 
 function buildTrackerSummaries(): Record<string, TrackerSummary> {
@@ -255,6 +269,7 @@ function buildTrackerSummaries(): Record<string, TrackerSummary> {
       const totalTasks = tasks.length;
       const completedCount = tasks.filter((task) => Boolean(t.completedTaskIds[task.id])).length;
       const completionPct = totalTasks > 0 ? Math.round((completedCount / totalTasks) * 100) : 0;
+      const signedDaysCount = Object.keys(t.parentSignaturesByDay ?? {}).length;
       return {
         id: t.id,
         studentName: t.studentName,
@@ -262,6 +277,7 @@ function buildTrackerSummaries(): Record<string, TrackerSummary> {
         completedCount,
         totalTasks,
         completionPct,
+        signedDaysCount,
         updatedAt: t.updatedAt,
       };
     });
@@ -323,13 +339,17 @@ function buildPushPayloadForRecord(record: StoredPushRecord, localDate: string) 
   const day =
     plan.dailySchedule.find((d) => d.date === localDate) || plan.dailySchedule[0];
   const tasks = day
-    ? day.tasks.filter(
-        (t) =>
+    ? day.tasks.filter((t) => {
+        if (t.studentTrackerId) {
+          return Boolean(tracker && t.studentTrackerId === tracker.id);
+        }
+        return (
           !tracker?.selectedGroup ||
           tracker.selectedGroup === 'All' ||
           !t.group ||
           t.group === tracker.selectedGroup
-      )
+        );
+      })
     : [];
 
   const remaining = tracker
@@ -648,17 +668,29 @@ async function startServer(): Promise<void> {
     const nextTargets = body.targets ?? existing.targets;
     const nextTrack = body.trackType ?? existing.trackType;
     const nextRange = body.dateRange ?? existing.dateRange;
-    const groups = detectGroups(nextTargets);
 
     const dailySchedule = body.regenerateFromTeacherInput
       ? generateDailySchedule(existing.slug, nextTrack, nextTargets, nextRange)
       : body.dailySchedule ?? existing.dailySchedule;
 
+    const detectedGroups = detectGroups(nextTargets);
+    const taskGroups = dailySchedule
+      .flatMap((d) => d.tasks.map((t) => t.group?.trim()))
+      .filter((g): g is string => Boolean(g));
+    const groups = Array.from(
+      new Set([
+        ...(body.groups !== undefined ? body.groups : existing.groups ?? []),
+        ...detectedGroups,
+        ...taskGroups,
+      ])
+    );
+
     const scheduleOrTargetsEdited =
       body.dailySchedule !== undefined ||
       body.targets !== undefined ||
       body.trackType !== undefined ||
-      body.dateRange !== undefined;
+      body.dateRange !== undefined ||
+      body.groups !== undefined;
 
     const updated: ClassPlan = {
       ...existing,
@@ -696,15 +728,12 @@ async function startServer(): Promise<void> {
       res.status(404).json({ error: 'Class revision link not found.' });
       return;
     }
-    const existingStudents = Object.values(store.trackers)
-      .filter((t) => t.classPlanId === plan.id)
-      .map((t) => ({
-        id: t.id,
-        studentName: t.studentName,
-        selectedGroup: t.selectedGroup,
-        updatedAt: t.updatedAt,
-      }));
-    res.json({ plan, existingStudents, vapidPublicKey: vapidKeys.publicKey });
+    // Never expose other classmates' names/trackers or student-specific tasks on a public class QR
+    res.json({
+      plan: sanitizePlanForQr(plan),
+      existingStudents: [],
+      vapidPublicKey: vapidKeys.publicKey,
+    });
   });
 
   app.post('/api/trackers', (req, res) => {
@@ -736,7 +765,11 @@ async function startServer(): Promise<void> {
         existing.updatedAt = new Date().toISOString();
         saveStore();
       }
-      res.json({ tracker: existing, plan, vapidPublicKey: vapidKeys.publicKey });
+      res.json({
+        tracker: existing,
+        plan: sanitizePlanForQr(plan, existing.id),
+        vapidPublicKey: vapidKeys.publicKey,
+      });
       return;
     }
 
@@ -750,12 +783,17 @@ async function startServer(): Promise<void> {
       selectedGroup,
       completedTaskIds: {},
       notesByDay: {},
+      parentSignaturesByDay: {},
       createdAt: now,
       updatedAt: now,
     };
     store.trackers[id] = tracker;
     saveStore();
-    res.status(201).json({ tracker, plan, vapidPublicKey: vapidKeys.publicKey });
+    res.status(201).json({
+      tracker,
+      plan: sanitizePlanForQr(plan, tracker.id),
+      vapidPublicKey: vapidKeys.publicKey,
+    });
   });
 
   app.get('/api/trackers/:trackerId', (req, res) => {
@@ -774,7 +812,7 @@ async function startServer(): Promise<void> {
     );
     res.json({
       tracker,
-      plan,
+      plan: sanitizePlanForQr(plan, tracker.id),
       vapidPublicKey: vapidKeys.publicKey,
       pushPreferences: pushSub
         ? {
@@ -798,6 +836,10 @@ async function startServer(): Promise<void> {
       date?: string;
       note?: string;
       selectedGroup?: string;
+      parentSignature?: {
+        date: string;
+        surname: string | null;
+      };
     };
 
     if (body.taskId) {
@@ -812,6 +854,20 @@ async function startServer(): Promise<void> {
         tracker.notesByDay[body.date] = body.note;
       } else {
         delete tracker.notesByDay[body.date];
+      }
+    }
+    if (body.parentSignature?.date) {
+      if (!tracker.parentSignaturesByDay) {
+        tracker.parentSignaturesByDay = {};
+      }
+      const cleanSurname = (body.parentSignature.surname || '').trim();
+      if (cleanSurname) {
+        tracker.parentSignaturesByDay[body.parentSignature.date] = {
+          surname: cleanSurname,
+          signedAt: new Date().toISOString(),
+        };
+      } else {
+        delete tracker.parentSignaturesByDay[body.parentSignature.date];
       }
     }
     if (body.selectedGroup) {

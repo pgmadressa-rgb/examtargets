@@ -204,6 +204,10 @@ export async function toggleTrackerTask(
     date?: string;
     note?: string;
     selectedGroup?: string;
+    parentSignature?: {
+      date: string;
+      surname: string | null;
+    };
   }
 ) {
   const res = await fetch(`/api/trackers/${encodeURIComponent(trackerId)}/toggle`, {

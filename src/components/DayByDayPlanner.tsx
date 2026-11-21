@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Calendar,
+  Layers,
   Plus,
   RefreshCw,
   Save,
   Trash2,
+  User,
   UserPlus,
+  Users,
   X,
 } from 'lucide-react';
 import type {
@@ -15,16 +18,22 @@ import type {
   RevisionTask,
   TaskCategory,
   TrackType,
+  TrackerSummary,
 } from '../shared/types.ts';
+import { createOrGetStudentTracker, toggleTrackerTask } from './ApiClient.ts';
 import { TeacherClassSelector } from './TeacherClassSelector.tsx';
+
+type EditTargetScope = 'class' | 'group' | 'student';
 
 interface DayByDayPlannerProps {
   plans: ClassPlan[];
+  trackersSummary: Record<string, TrackerSummary>;
   globalDateRange: DateRange;
   selectedPlanId: string;
   onSelectPlanId: (id: string) => void;
   includeWeekends: boolean;
   onToggleWeekends: (next: boolean) => void;
+  onRefreshState: () => Promise<void>;
   onUpdateGlobalDateRange: (
     startDate: string,
     endDate: string,
@@ -48,11 +57,13 @@ const CATEGORY_LABELS: Record<TaskCategory, string> = {
 
 export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
   plans,
+  trackersSummary,
   globalDateRange,
   selectedPlanId,
   onSelectPlanId,
   includeWeekends,
   onToggleWeekends,
+  onRefreshState,
   onUpdateGlobalDateRange,
   onSavePlan,
   onAddPlan,
@@ -65,6 +76,15 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
+  // Target Scope Landing Mode: Whole Class (default) -> Groups -> Individual Students
+  const [editScope, setEditScope] = useState<EditTargetScope>('class');
+  const [activeGroupFilter, setActiveGroupFilter] = useState<string>('All');
+  const [showBaselineInFilter, setShowBaselineInFilter] = useState(true);
+  const [newGroupNameInput, setNewGroupNameInput] = useState('');
+  const [activeStudentId, setActiveStudentId] = useState<string>('');
+  const [newStudentNameInput, setNewStudentNameInput] = useState('');
+  const [newStudentGroupInput, setNewStudentGroupInput] = useState('All');
+
   useEffect(() => {
     setStartInput(globalDateRange.startDate);
     setEndInput(globalDateRange.endDate);
@@ -74,6 +94,34 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
     () => plans.find((p) => p.id === selectedPlanId) ?? plans[0] ?? null,
     [plans, selectedPlanId]
   );
+
+  const classStudents = useMemo(
+    () => (selectedPlan ? trackersSummary[selectedPlan.id]?.students ?? [] : []),
+    [selectedPlan, trackersSummary]
+  );
+
+  const selectedStudent = useMemo(
+    () => classStudents.find((s) => s.id === activeStudentId) ?? classStudents[0] ?? null,
+    [classStudents, activeStudentId]
+  );
+
+  useEffect(() => {
+    if (!selectedPlan) return;
+    setActiveGroupFilter((prev) =>
+      prev !== 'All' && selectedPlan.groups.includes(prev)
+        ? prev
+        : selectedPlan.groups[0] ?? 'All'
+    );
+    setNewStudentGroupInput(selectedPlan.groups[0] ?? 'All');
+  }, [selectedPlan?.id, selectedPlan?.groups]);
+
+  useEffect(() => {
+    if (classStudents.length === 0) {
+      setActiveStudentId('');
+    } else if (!classStudents.some((s) => s.id === activeStudentId)) {
+      setActiveStudentId(classStudents[0].id);
+    }
+  }, [classStudents, activeStudentId]);
 
   const [draftDays, setDraftDays] = useState<RevisionDay[] | null>(null);
   const activeSchedule = draftDays ?? selectedPlan?.dailySchedule ?? [];
@@ -132,6 +180,40 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
     setDraftDays(next);
   };
 
+  const handleTaskTargetChange = (date: string, taskId: string, targetValue: string) => {
+    const base = draftDays ?? selectedPlan?.dailySchedule ?? [];
+    const next = base.map((day) => {
+      if (day.date !== date) return day;
+      return {
+        ...day,
+        tasks: day.tasks.map((t) => {
+          if (t.id !== taskId) return t;
+          if (targetValue === 'class') {
+            const { group: _g, studentTrackerId: _sid, studentName: _sn, ...rest } = t;
+            return rest;
+          }
+          if (targetValue.startsWith('group:')) {
+            const grp = targetValue.slice('group:'.length);
+            const { studentTrackerId: _sid, studentName: _sn, ...rest } = t;
+            return { ...rest, group: grp };
+          }
+          if (targetValue.startsWith('student:')) {
+            const sid = targetValue.slice('student:'.length);
+            const stu = classStudents.find((s) => s.id === sid);
+            const { group: _g, ...rest } = t;
+            return {
+              ...rest,
+              studentTrackerId: sid,
+              studentName: stu?.studentName || t.studentName || 'Student',
+            };
+          }
+          return t;
+        }),
+      };
+    });
+    setDraftDays(next);
+  };
+
   const handleRemoveTask = (date: string, taskId: string) => {
     const base = draftDays ?? selectedPlan?.dailySchedule ?? [];
     const next = base.map((day) => {
@@ -144,6 +226,14 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
   const handleConfirmAddTask = (date: string) => {
     if (!selectedPlan || !newTaskTitle.trim()) return;
     const base = draftDays ?? selectedPlan.dailySchedule;
+
+    const targetGroup =
+      editScope === 'group' && activeGroupFilter !== 'All'
+        ? activeGroupFilter
+        : newTaskGroup.trim() || undefined;
+    const targetStudent =
+      editScope === 'student' && selectedStudent ? selectedStudent : null;
+
     const next = base.map((day) => {
       if (day.date !== date) return day;
       const created: RevisionTask = {
@@ -151,7 +241,14 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
         category: newTaskCategory,
         title: newTaskTitle.trim(),
         detail: newTaskDetail.trim() || 'Follow teacher guidance',
-        ...(newTaskGroup.trim() ? { group: newTaskGroup.trim() } : {}),
+        ...(targetStudent
+          ? {
+              studentTrackerId: targetStudent.id,
+              studentName: targetStudent.studentName,
+            }
+          : targetGroup
+            ? { group: targetGroup }
+            : {}),
       };
       return { ...day, tasks: [...day.tasks, created] };
     });
@@ -160,6 +257,69 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
     setNewTaskTitle('');
     setNewTaskDetail('');
     setNewTaskGroup('');
+  };
+
+  const handleCreateGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPlan) return;
+    const cleanGroup = newGroupNameInput.trim();
+    if (!cleanGroup) return;
+    if (selectedPlan.groups.some((g) => g.toLowerCase() === cleanGroup.toLowerCase())) {
+      setActiveGroupFilter(cleanGroup);
+      setNewGroupNameInput('');
+      return;
+    }
+    setBusy(true);
+    setStatusMessage(null);
+    try {
+      const nextGroups = [...selectedPlan.groups, cleanGroup];
+      await onSavePlan(selectedPlan.id, { groups: nextGroups });
+      setActiveGroupFilter(cleanGroup);
+      setNewGroupNameInput('');
+      setStatusMessage(`Created group "${cleanGroup}" for ${selectedPlan.className}.`);
+    } catch (err) {
+      setStatusMessage((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAddStudentToClass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPlan) return;
+    const cleanName = newStudentNameInput.trim();
+    if (!cleanName) return;
+    setBusy(true);
+    setStatusMessage(null);
+    try {
+      const res = await createOrGetStudentTracker({
+        classPlanId: selectedPlan.id,
+        studentName: cleanName,
+        selectedGroup: newStudentGroupInput || 'All',
+      });
+      await onRefreshState();
+      setActiveStudentId(res.tracker.id);
+      setNewStudentNameInput('');
+      setStatusMessage(`Added "${res.tracker.studentName}" to ${selectedPlan.className}.`);
+    } catch (err) {
+      setStatusMessage((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleChangeStudentGroup = async (studentId: string, nextGroup: string) => {
+    setBusy(true);
+    setStatusMessage(null);
+    try {
+      await toggleTrackerTask(studentId, { selectedGroup: nextGroup });
+      await onRefreshState();
+      setStatusMessage(`Updated student’s group assignment to "${nextGroup}".`);
+    } catch (err) {
+      setStatusMessage((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleSaveSchedule = async () => {
@@ -253,7 +413,8 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
             Day-by-Day Study Plan Editor
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            Configure your custom ~2-week revision window and refine teacher-generated daily tasks.
+            Choose who you are editing for (Whole Class, Groups, or Individual Students) and refine
+            daily revision tasks.
           </p>
         </div>
         <button
@@ -265,6 +426,278 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
           Add Teacher / Class
         </button>
       </div>
+
+      {/* Landing Option: Editing Scope Selector (Whole Class -> Groups -> Students) */}
+      <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Editing Target Scope
+          </div>
+          <span className="text-xs text-slate-500">
+            Switch seamlessly between class-wide, group, or student-level plans
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <button
+            type="button"
+            onClick={() => setEditScope('class')}
+            className={`flex items-start gap-3 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+              editScope === 'class'
+                ? 'border-teal-700 bg-teal-50/70'
+                : 'border-slate-200 bg-slate-50/50 hover:bg-slate-50'
+            }`}
+          >
+            <div
+              className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                editScope === 'class' ? 'bg-teal-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
+              }`}
+            >
+              <Users className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-slate-900">Whole Class</div>
+              <p className="mt-0.5 text-xs text-slate-600">
+                Edit daily tasks shared by every student in the class.
+              </p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setEditScope('group')}
+            className={`flex items-start gap-3 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+              editScope === 'group'
+                ? 'border-teal-700 bg-teal-50/70'
+                : 'border-slate-200 bg-slate-50/50 hover:bg-slate-50'
+            }`}
+          >
+            <div
+              className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                editScope === 'group' ? 'bg-teal-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
+              }`}
+            >
+              <Layers className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-slate-900">
+                Groups{selectedPlan && selectedPlan.groups.length > 0 ? ` (${selectedPlan.groups.length})` : ''}
+              </div>
+              <p className="mt-0.5 text-xs text-slate-600">
+                Create groups and tailor tasks for Group 1, Group 2, or ability tiers.
+              </p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setEditScope('student')}
+            className={`flex items-start gap-3 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+              editScope === 'student'
+                ? 'border-teal-700 bg-teal-50/70'
+                : 'border-slate-200 bg-slate-50/50 hover:bg-slate-50'
+            }`}
+          >
+            <div
+              className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                editScope === 'student' ? 'bg-teal-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
+              }`}
+            >
+              <User className="h-4 w-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-slate-900">
+                Individual Students ({classStudents.length})
+              </div>
+              <p className="mt-0.5 text-xs text-slate-600">
+                Assign students to groups or add private student-specific tasks.
+              </p>
+            </div>
+          </button>
+        </div>
+
+        {/* Group Scope Sub-Bar */}
+        {selectedPlan && editScope === 'group' && (
+          <div className="border-t border-slate-100 pt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveGroupFilter('All')}
+                className={`min-h-[36px] rounded-lg border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                  activeGroupFilter === 'All'
+                    ? 'border-slate-900 bg-slate-900 text-white'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                All Groups
+              </button>
+              {selectedPlan.groups.map((grp) => (
+                <button
+                  key={grp}
+                  type="button"
+                  onClick={() => setActiveGroupFilter(grp)}
+                  className={`min-h-[36px] rounded-lg border px-3 py-1.5 text-xs font-medium whitespace-nowrap ${
+                    activeGroupFilter === grp
+                      ? 'border-teal-700 bg-teal-700 text-white'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {grp}
+                </button>
+              ))}
+
+              <label className="inline-flex min-h-[36px] items-center gap-1.5 pl-2 text-xs text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showBaselineInFilter}
+                  onChange={(e) => setShowBaselineInFilter(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-teal-700"
+                />
+                Show Whole Class baseline tasks
+              </label>
+            </div>
+
+            <form onSubmit={(e) => void handleCreateGroup(e)} className="flex items-center gap-2 shrink-0">
+              <input
+                type="text"
+                value={newGroupNameInput}
+                onChange={(e) => setNewGroupNameInput(e.target.value)}
+                placeholder="New group name (e.g. Group 1)"
+                className="min-h-[36px] w-48 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={busy || !newGroupNameInput.trim()}
+                className="inline-flex min-h-[36px] items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-45 whitespace-nowrap"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Group
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* Individual Student Scope Sub-Bar */}
+        {selectedPlan && editScope === 'student' && (
+          <div className="border-t border-slate-100 pt-4 space-y-3">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <div className="flex flex-wrap items-end gap-3 flex-1">
+                {classStudents.length > 0 ? (
+                  <>
+                    <div className="min-w-[200px]">
+                      <label
+                        htmlFor="editor-student-select"
+                        className="block text-xs font-medium text-slate-600 mb-1"
+                      >
+                        Editing Plan For Student
+                      </label>
+                      <select
+                        id="editor-student-select"
+                        value={selectedStudent?.id ?? ''}
+                        onChange={(e) => setActiveStudentId(e.target.value)}
+                        className="w-full min-h-[38px] rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                      >
+                        {classStudents.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.studentName} ({s.completionPct}% · {s.selectedGroup})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {selectedStudent && (
+                      <div className="min-w-[160px]">
+                        <label
+                          htmlFor="editor-student-group"
+                          className="block text-xs font-medium text-slate-600 mb-1"
+                        >
+                          Student’s Assigned Group
+                        </label>
+                        <select
+                          id="editor-student-group"
+                          disabled={busy}
+                          value={selectedStudent.selectedGroup}
+                          onChange={(e) =>
+                            void handleChangeStudentGroup(selectedStudent.id, e.target.value)
+                          }
+                          className="w-full min-h-[38px] rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                        >
+                          <option value="All">All (Whole Class)</option>
+                          {selectedPlan.groups.map((g) => (
+                            <option key={g} value={g}>
+                              {g}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <label className="inline-flex min-h-[38px] items-center gap-1.5 text-xs text-slate-600 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showBaselineInFilter}
+                        onChange={(e) => setShowBaselineInFilter(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-slate-300 text-teal-700"
+                      />
+                      Show class &amp; group baseline tasks
+                    </label>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-600">
+                    No tracked students in {selectedPlan.className} yet — add a student below to
+                    assign a group or create student-specific daily tasks.
+                  </p>
+                )}
+              </div>
+
+              <form
+                onSubmit={(e) => void handleAddStudentToClass(e)}
+                className="flex flex-wrap items-end gap-2 shrink-0"
+              >
+                <div>
+                  <label
+                    htmlFor="editor-new-student-name"
+                    className="block text-xs font-medium text-slate-600 mb-1"
+                  >
+                    Add Student to {selectedPlan.className}
+                  </label>
+                  <input
+                    id="editor-new-student-name"
+                    type="text"
+                    value={newStudentNameInput}
+                    onChange={(e) => setNewStudentNameInput(e.target.value)}
+                    placeholder="Student full name"
+                    className="min-h-[38px] w-44 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                  />
+                </div>
+                {selectedPlan.groups.length > 0 && (
+                  <select
+                    aria-label="New student group"
+                    value={newStudentGroupInput}
+                    onChange={(e) => setNewStudentGroupInput(e.target.value)}
+                    className="min-h-[38px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900"
+                  >
+                    <option value="All">All</option>
+                    {selectedPlan.groups.map((g) => (
+                      <option key={g} value={g}>
+                        {g}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  type="submit"
+                  disabled={busy || !newStudentNameInput.trim()}
+                  className="inline-flex min-h-[38px] items-center gap-1 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-45 whitespace-nowrap"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add Student
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* Custom Date Range Controller */}
       <section className="rounded-xl border border-slate-200 bg-white p-5">
@@ -447,145 +880,250 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
                   const dow = new Date(`${day.date}T12:00:00Z`).getUTCDay();
                   return dow >= 1 && dow <= 5;
                 })
-                .map((day) => (
-                <div
-                  key={day.date}
-                  className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"
-                >
-                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-xs font-semibold text-teal-800 font-mono-tabular">
-                        Day {day.dayIndex}
-                      </span>
-                      <span aria-hidden="true" className="text-slate-300">
-                        ·
-                      </span>
-                      <span className="text-sm font-semibold text-slate-900 font-mono-tabular">
-                        {day.weekday}, {day.date}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setAddingForDate(addingForDate === day.date ? null : day.date)
-                      }
-                      className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                .map((day) => {
+                  const visibleTasks = day.tasks.filter((task) => {
+                    if (editScope === 'class') {
+                      return true;
+                    }
+                    if (editScope === 'group') {
+                      if (task.studentTrackerId) return false;
+                      if (activeGroupFilter === 'All') return true;
+                      if (task.group === activeGroupFilter) return true;
+                      return showBaselineInFilter && !task.group;
+                    }
+                    // editScope === 'student'
+                    if (!selectedStudent) return !task.studentTrackerId;
+                    if (task.studentTrackerId) {
+                      return task.studentTrackerId === selectedStudent.id;
+                    }
+                    if (!showBaselineInFilter) return false;
+                    return (
+                      selectedStudent.selectedGroup === 'All' ||
+                      !task.group ||
+                      task.group === selectedStudent.selectedGroup
+                    );
+                  });
+
+                  const addBtnLabel =
+                    editScope === 'group' && activeGroupFilter !== 'All'
+                      ? `Add for ${activeGroupFilter}`
+                      : editScope === 'student' && selectedStudent
+                        ? `Add for ${selectedStudent.studentName}`
+                        : 'Add Task';
+
+                  return (
+                    <div
+                      key={day.date}
+                      className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"
                     >
-                      <Plus className="h-3.5 w-3.5" />
-                      Add Task
-                    </button>
-                  </div>
-
-                  <div className="mt-3 space-y-2.5">
-                    {day.tasks.map((task) => (
-                      <div
-                        key={task.id}
-                        className="flex flex-col gap-2 rounded-lg bg-slate-50 p-3 sm:flex-row sm:items-start"
-                      >
-                        <select
-                          aria-label="Task category"
-                          value={task.category}
-                          onChange={(e) =>
-                            handleTaskFieldChange(day.date, task.id, 'category', e.target.value)
-                          }
-                          className="min-h-[36px] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 focus:border-teal-700 focus:outline-none sm:w-36 shrink-0"
-                        >
-                          {Object.entries(CATEGORY_LABELS).map(([k, label]) => (
-                            <option key={k} value={k}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-
-                        <div className="flex-1 space-y-1.5">
-                          <input
-                            type="text"
-                            value={task.title}
-                            onChange={(e) =>
-                              handleTaskFieldChange(day.date, task.id, 'title', e.target.value)
-                            }
-                            className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-900 focus:border-teal-700 focus:outline-none"
-                          />
-                          <textarea
-                            rows={2}
-                            value={task.detail}
-                            onChange={(e) =>
-                              handleTaskFieldChange(day.date, task.id, 'detail', e.target.value)
-                            }
-                            className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-teal-700 focus:outline-none"
-                          />
+                      <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                        <div className="flex items-center gap-2.5">
+                          <span className="text-xs font-semibold text-teal-800 font-mono-tabular">
+                            Day {day.dayIndex}
+                          </span>
+                          <span aria-hidden="true" className="text-slate-300">
+                            ·
+                          </span>
+                          <span className="text-sm font-semibold text-slate-900 font-mono-tabular">
+                            {day.weekday}, {day.date}
+                          </span>
                         </div>
-
                         <button
                           type="button"
-                          onClick={() => handleRemoveTask(day.date, task.id)}
-                          className="self-end rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-700 sm:self-start"
-                          aria-label="Remove task"
+                          onClick={() =>
+                            setAddingForDate(addingForDate === day.date ? null : day.date)
+                          }
+                          className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Plus className="h-3.5 w-3.5" />
+                          {addBtnLabel}
                         </button>
                       </div>
-                    ))}
 
-                    {addingForDate === day.date && (
-                      <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 space-y-2">
-                        <div className="flex flex-wrap gap-2">
-                          <select
-                            value={newTaskCategory}
-                            onChange={(e) => setNewTaskCategory(e.target.value as TaskCategory)}
-                            className="min-h-[36px] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-800"
-                          >
-                            {Object.entries(CATEGORY_LABELS).map(([k, label]) => (
-                              <option key={k} value={k}>
-                                {label}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="text"
-                            placeholder="Task title (e.g. Practice Surah Kahf)"
-                            value={newTaskTitle}
-                            onChange={(e) => setNewTaskTitle(e.target.value)}
-                            className="flex-1 min-w-[180px] rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
-                          />
-                          {selectedPlan.groups.length > 0 && (
+                      <div className="mt-3 space-y-2.5">
+                        {visibleTasks.length === 0 && (
+                          <p className="text-xs text-slate-400 italic py-1">
+                            No tasks matching this scope for Day {day.dayIndex}. Click “{addBtnLabel}”
+                            above to add one.
+                          </p>
+                        )}
+
+                        {visibleTasks.map((task) => {
+                          const targetValue = task.studentTrackerId
+                            ? `student:${task.studentTrackerId}`
+                            : task.group
+                              ? `group:${task.group}`
+                              : 'class';
+                          return (
+                            <div
+                              key={task.id}
+                              className="flex flex-col gap-2 rounded-lg bg-slate-50 p-3 sm:flex-row sm:items-start"
+                            >
+                              <div className="flex flex-col gap-1.5 sm:w-40 shrink-0">
+                                <select
+                                  aria-label="Task category"
+                                  value={task.category}
+                                  onChange={(e) =>
+                                    handleTaskFieldChange(
+                                      day.date,
+                                      task.id,
+                                      'category',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="min-h-[36px] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 focus:border-teal-700 focus:outline-none"
+                                >
+                                  {Object.entries(CATEGORY_LABELS).map(([k, label]) => (
+                                    <option key={k} value={k}>
+                                      {label}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <select
+                                  aria-label="Task audience scope"
+                                  value={targetValue}
+                                  onChange={(e) =>
+                                    handleTaskTargetChange(day.date, task.id, e.target.value)
+                                  }
+                                  className={`min-h-[32px] rounded-md border px-2 py-1 text-[11px] font-medium focus:border-teal-700 focus:outline-none ${
+                                    task.studentTrackerId
+                                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                                      : task.group
+                                        ? 'border-teal-300 bg-teal-50 text-teal-900'
+                                        : 'border-slate-200 bg-white text-slate-600'
+                                  }`}
+                                >
+                                  <option value="class">Whole Class</option>
+                                  {selectedPlan.groups.map((grp) => (
+                                    <option key={grp} value={`group:${grp}`}>
+                                      Group: {grp}
+                                    </option>
+                                  ))}
+                                  {classStudents.map((stu) => (
+                                    <option key={stu.id} value={`student:${stu.id}`}>
+                                      Student: {stu.studentName}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              <div className="flex-1 space-y-1.5">
+                                <input
+                                  type="text"
+                                  value={task.title}
+                                  onChange={(e) =>
+                                    handleTaskFieldChange(
+                                      day.date,
+                                      task.id,
+                                      'title',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-900 focus:border-teal-700 focus:outline-none"
+                                />
+                                <textarea
+                                  rows={2}
+                                  value={task.detail}
+                                  onChange={(e) =>
+                                    handleTaskFieldChange(
+                                      day.date,
+                                      task.id,
+                                      'detail',
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-teal-700 focus:outline-none"
+                                />
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveTask(day.date, task.id)}
+                                className="self-end rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-700 sm:self-start"
+                                aria-label="Remove task"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          );
+                        })}
+
+                        {addingForDate === day.date && (
+                          <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 space-y-2">
+                            <div className="text-[11px] font-semibold text-teal-900">
+                              Adding for:{' '}
+                              {editScope === 'student' && selectedStudent
+                                ? `Student — ${selectedStudent.studentName} only`
+                                : editScope === 'group' && activeGroupFilter !== 'All'
+                                  ? `Group — ${activeGroupFilter}`
+                                  : 'Whole Class'}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <select
+                                value={newTaskCategory}
+                                onChange={(e) =>
+                                  setNewTaskCategory(e.target.value as TaskCategory)
+                                }
+                                className="min-h-[36px] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-800"
+                              >
+                                {Object.entries(CATEGORY_LABELS).map(([k, label]) => (
+                                  <option key={k} value={k}>
+                                    {label}
+                                  </option>
+                                ))}
+                              </select>
+                              <input
+                                type="text"
+                                placeholder="Task title (e.g. Practice Surah Kahf)"
+                                value={newTaskTitle}
+                                onChange={(e) => setNewTaskTitle(e.target.value)}
+                                className="flex-1 min-w-[180px] rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
+                              />
+                              {editScope === 'class' && selectedPlan.groups.length > 0 && (
+                                <select
+                                  value={newTaskGroup}
+                                  onChange={(e) => setNewTaskGroup(e.target.value)}
+                                  className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
+                                >
+                                  <option value="">Whole Class</option>
+                                  {selectedPlan.groups.map((grp) => (
+                                    <option key={grp} value={grp}>
+                                      {grp}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
                             <input
                               type="text"
-                              placeholder="Group (optional)"
-                              value={newTaskGroup}
-                              onChange={(e) => setNewTaskGroup(e.target.value)}
-                              className="w-28 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
+                              placeholder="Details / pages / verses"
+                              value={newTaskDetail}
+                              onChange={(e) => setNewTaskDetail(e.target.value)}
+                              className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
                             />
-                          )}
-                        </div>
-                        <input
-                          type="text"
-                          placeholder="Details / pages / verses"
-                          value={newTaskDetail}
-                          onChange={(e) => setNewTaskDetail(e.target.value)}
-                          className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-900"
-                        />
-                        <div className="flex justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setAddingForDate(null)}
-                            className="rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleConfirmAddTask(day.date)}
-                            className="rounded-md bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800"
-                          >
-                            Add to Day {day.dayIndex}
-                          </button>
-                        </div>
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setAddingForDate(null)}
+                                className="rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleConfirmAddTask(day.date)}
+                                className="rounded-md bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800"
+                              >
+                                Add to Day {day.dayIndex}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </div>
-              ))}
+                    </div>
+                  );
+                })}
             </div>
           </div>
         </div>

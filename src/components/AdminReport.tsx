@@ -616,6 +616,9 @@ export const AdminReport: React.FC<AdminReportProps> = ({
                             <span className="text-xs font-medium text-slate-700 font-mono-tabular">
                               {student.completedCount}/{student.totalTasks} ({student.completionPct}
                               %)
+                              {typeof student.signedDaysCount === 'number' && student.signedDaysCount > 0
+                                ? ` · ${student.signedDaysCount}d signed`
+                                : ''}
                             </span>
                           </div>
                         </div>

@@ -17,6 +17,8 @@ export interface RevisionTask {
   title: string;
   detail: string;
   group?: string;
+  studentTrackerId?: string;
+  studentName?: string;
 }
 
 export interface RevisionDay {
@@ -69,6 +71,11 @@ export interface ClassPlan {
   manuallyEdited: boolean;
 }
 
+export interface ParentSignature {
+  surname: string;
+  signedAt: string;
+}
+
 export interface StudentTracker {
   id: string;
   classPlanId: string;
@@ -77,6 +84,7 @@ export interface StudentTracker {
   selectedGroup: string;
   completedTaskIds: Record<string, string>; // taskId -> ISO completedAt
   notesByDay: Record<string, string>;
+  parentSignaturesByDay?: Record<string, ParentSignature>; // date -> parent surname signature
   createdAt: string;
   updatedAt: string;
 }
@@ -92,6 +100,7 @@ export interface TrackerSummary {
     completedCount: number;
     totalTasks: number;
     completionPct: number;
+    signedDaysCount?: number;
     updatedAt: string;
   }>;
 }

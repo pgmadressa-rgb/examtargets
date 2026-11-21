@@ -8,12 +8,19 @@ import {
   isMeaningful,
   normalizeTeacherKey,
 } from '../shared/planEngine.ts';
-import type { ClassPlan, DateRange, RevisionTask, StudentTracker } from '../shared/types.ts';
+import type {
+  ClassPlan,
+  DateRange,
+  RevisionTask,
+  StudentTracker,
+  TrackerSummary,
+} from '../shared/types.ts';
 import { createOrGetStudentTracker } from './ApiClient.ts';
 import { TeacherClassSelector } from './TeacherClassSelector.tsx';
 
 interface PrintStudioProps {
   plans: ClassPlan[];
+  trackersSummary?: Record<string, TrackerSummary>;
   activeTermName: string;
   globalDateRange: DateRange;
   selectedPlanId: string;
@@ -145,6 +152,7 @@ const ROW_TINT_CONFIG: Record<
 
 export const PrintStudio: React.FC<PrintStudioProps> = ({
   plans,
+  trackersSummary,
   activeTermName,
   globalDateRange,
   selectedPlanId,
@@ -157,6 +165,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   onUpdateGlobalDateRange,
 }) => {
   const [scope, setScope] = useState<PrintScope>('single');
+  const [qrMode, setQrMode] = useState<'class' | 'students'>('class');
   const [sheetStyle, setSheetStyle] = useState<SheetStyle>('minimal');
   const [rowTint, setRowTint] = useState<RowTintOption>('slate');
   const [studentNamesInput, setStudentNamesInput] = useState('');
@@ -168,6 +177,11 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   const selectedPlan = useMemo(
     () => plans.find((p) => p.id === selectedPlanId) ?? plans[0] ?? null,
     [plans, selectedPlanId]
+  );
+
+  const enrolledStudents = useMemo(
+    () => (selectedPlan ? trackersSummary?.[selectedPlan.id]?.students ?? [] : []),
+    [selectedPlan, trackersSummary]
   );
 
   const [teacherNameDraft, setTeacherNameDraft] = useState(selectedPlan?.teacherName ?? '');
@@ -219,23 +233,29 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
       return plan;
     };
 
-    if (scope === 'all') {
-      return plans.map((plan) => ({
-        key: plan.id,
-        plan: withPrintDraft(plan),
-        qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
-      }));
-    }
-    if (scope === 'teacher' && selectedTeacherGroup) {
-      return selectedTeacherGroup.plans.map((plan) => ({
-        key: plan.id,
-        plan: withPrintDraft(plan),
-        qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
-      }));
+    if (qrMode === 'class') {
+      if (scope === 'all') {
+        return plans.map((plan) => ({
+          key: plan.id,
+          plan: withPrintDraft(plan),
+          qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
+        }));
+      }
+      if (scope === 'teacher' && selectedTeacherGroup) {
+        return selectedTeacherGroup.plans.map((plan) => ({
+          key: plan.id,
+          plan: withPrintDraft(plan),
+          qrUrl: `${origin}/?track=${encodeURIComponent(plan.slug)}`,
+        }));
+      }
     }
     if (!selectedPlan) return [];
     const previewPlan = withPrintDraft(selectedPlan);
-    if (generatedTrackers.length > 0 && generatedTrackers[0].classPlanId === selectedPlan.id) {
+    if (
+      qrMode === 'students' &&
+      generatedTrackers.length > 0 &&
+      generatedTrackers[0].classPlanId === selectedPlan.id
+    ) {
       return generatedTrackers.map((t) => ({
         key: t.id,
         plan: previewPlan,
@@ -252,6 +272,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
     ];
   }, [
     scope,
+    qrMode,
     plans,
     selectedTeacherGroup,
     selectedPlan,
@@ -311,6 +332,29 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
     }
   };
 
+  const handleSwitchQrMode = (nextMode: 'class' | 'students') => {
+    setQrMode(nextMode);
+    if (nextMode === 'students') {
+      setScope('single');
+      setMessage(
+        generatedTrackers.length > 0
+          ? `Showing ${generatedTrackers.length} individual student QR sheet(s).`
+          : 'Enter or select student names below to generate individual QR handouts.'
+      );
+    } else {
+      setMessage('Whole Class QR enabled — parents scan one class QR and enter their child’s name.');
+    }
+  };
+
+  const handleAppendEnrolledStudent = (name: string) => {
+    const existing = studentNamesInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (existing.some((n) => n.toLowerCase() === name.toLowerCase())) return;
+    setStudentNamesInput([...existing, name].join(', '));
+  };
+
   const handleGeneratePersonalSheets = async () => {
     if (!selectedPlan) return;
     const names = studentNamesInput
@@ -319,7 +363,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
       .filter(Boolean);
     if (names.length === 0) {
       setGeneratedTrackers([]);
-      setMessage('Showing general class QR handout (parents enter name on scan).');
+      setMessage('Enter at least one student name to generate Individual Student QRs.');
       return;
     }
 
@@ -337,10 +381,11 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
         created.push(res.tracker);
       }
       setGeneratedTrackers(created);
+      setQrMode('students');
       setScope('single');
       await onTrackerCreated();
       setMessage(
-        `Generated ${created.length} personalised QR handout${created.length > 1 ? 's' : ''} for ${selectedPlan.className}.`
+        `Generated ${created.length} individual student QR handout${created.length > 1 ? 's' : ''} for ${selectedPlan.className}.`
       );
     } catch (err) {
       setMessage((err as Error).message);
@@ -475,7 +520,10 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
               <button
                 type="button"
                 onClick={() =>
-                  onOpenQrPreview(selectedPlan.slug, generatedTrackers[0]?.id)
+                  onOpenQrPreview(
+                    selectedPlan.slug,
+                    qrMode === 'students' ? generatedTrackers[0]?.id : undefined
+                  )
                 }
                 className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
               >
@@ -651,58 +699,167 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
             </div>
           )}
 
-          {scope === 'single' && selectedPlan && (
-            <div className="border-t border-slate-100 pt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-              <div className="flex-1">
-                <label
-                  htmlFor="student-roster-input"
-                  className="block text-xs font-medium text-slate-600 mb-1"
+          {/* Row 4: QR Code Generation Toggles (Whole Class Default ON + Separate Individual Students Toggle) */}
+          {selectedPlan && (
+            <div className="border-t border-slate-100 pt-4 space-y-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={qrMode === 'class'}
+                  onClick={() =>
+                    handleSwitchQrMode(qrMode === 'class' ? 'students' : 'class')
+                  }
+                  className={`flex items-center justify-between gap-4 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+                    qrMode === 'class'
+                      ? 'border-teal-700 bg-teal-50/60'
+                      : 'border-slate-200 bg-slate-50/60 hover:bg-slate-50'
+                  }`}
                 >
-                  Optional: Personalise QR Sheets for Specific Student(s) (comma-separated)
-                </label>
-                <input
-                  id="student-roster-input"
-                  type="text"
-                  value={studentNamesInput}
-                  onChange={(e) => setStudentNamesInput(e.target.value)}
-                  placeholder="Leave blank for general Class QR, or enter e.g. Amina Patel, Yusuf Khan"
-                  className="w-full min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-700 focus:bg-white focus:outline-none"
-                />
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-900">
+                      Whole Class QR (Default)
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-600">
+                      Single class QR code per handout — locked to that class only.
+                    </p>
+                  </div>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      qrMode === 'class' ? 'bg-teal-700' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        qrMode === 'class' ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={qrMode === 'students'}
+                  onClick={() =>
+                    handleSwitchQrMode(qrMode === 'students' ? 'class' : 'students')
+                  }
+                  className={`flex items-center justify-between gap-4 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
+                    qrMode === 'students'
+                      ? 'border-teal-700 bg-teal-50/60'
+                      : 'border-slate-200 bg-slate-50/60 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-900">
+                      Individual Students QR
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-600">
+                      Print separate personal QR sheets locked to each student.
+                    </p>
+                  </div>
+                  <span
+                    aria-hidden="true"
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                      qrMode === 'students' ? 'bg-teal-700' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        qrMode === 'students' ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </span>
+                </button>
               </div>
 
-              {selectedPlan.groups.length > 0 && (
-                <div>
-                  <label
-                    htmlFor="print-group-select"
-                    className="block text-xs font-medium text-slate-600 mb-1"
-                  >
-                    Group
-                  </label>
-                  <select
-                    id="print-group-select"
-                    value={selectedGroup}
-                    onChange={(e) => setSelectedGroup(e.target.value)}
-                    className="min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900"
-                  >
-                    <option value="All">All Groups</option>
-                    {selectedPlan.groups.map((g) => (
-                      <option key={g} value={g}>
-                        {g}
-                      </option>
-                    ))}
-                  </select>
+              {qrMode === 'students' && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+                  {enrolledStudents.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-medium text-slate-600">
+                        Enrolled in {selectedPlan.className}:
+                      </span>
+                      {enrolledStudents.map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => handleAppendEnrolledStudent(s.studentName)}
+                          className="min-h-[30px] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-teal-700 hover:text-teal-800 whitespace-nowrap"
+                        >
+                          + {s.studentName}
+                          {s.selectedGroup !== 'All' ? ` (${s.selectedGroup})` : ''}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStudentNamesInput(
+                            enrolledStudents.map((s) => s.studentName).join(', ')
+                          )
+                        }
+                        className="min-h-[30px] rounded-md border border-teal-700/30 bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-800 hover:bg-teal-100 whitespace-nowrap"
+                      >
+                        Select All ({enrolledStudents.length})
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <div className="flex-1">
+                      <label
+                        htmlFor="student-roster-input"
+                        className="block text-xs font-medium text-slate-600 mb-1"
+                      >
+                        Student Names for Individual QR Sheets (comma-separated)
+                      </label>
+                      <input
+                        id="student-roster-input"
+                        type="text"
+                        value={studentNamesInput}
+                        onChange={(e) => setStudentNamesInput(e.target.value)}
+                        placeholder="e.g. Amina Patel, Yusuf Khan"
+                        className="w-full min-h-[40px] rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-teal-700 focus:outline-none"
+                      />
+                    </div>
+
+                    {selectedPlan.groups.length > 0 && (
+                      <div>
+                        <label
+                          htmlFor="print-group-select"
+                          className="block text-xs font-medium text-slate-600 mb-1"
+                        >
+                          Group
+                        </label>
+                        <select
+                          id="print-group-select"
+                          value={selectedGroup}
+                          onChange={(e) => setSelectedGroup(e.target.value)}
+                          className="min-h-[40px] rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900"
+                        >
+                          <option value="All">All Groups</option>
+                          {selectedPlan.groups.map((g) => (
+                            <option key={g} value={g}>
+                              {g}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={busy || !studentNamesInput.trim()}
+                      onClick={() => void handleGeneratePersonalSheets()}
+                      className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-45 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <UserCheck className="h-4 w-4" />
+                      Generate Student QR Sheets
+                    </button>
+                  </div>
                 </div>
               )}
-
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void handleGeneratePersonalSheets()}
-                className="inline-flex min-h-[40px] items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-xs font-medium text-white hover:bg-teal-800 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <UserCheck className="h-4 w-4" />
-                {studentNamesInput.trim() ? 'Generate Student QR Sheets' : 'Use Class QR'}
-              </button>
             </div>
           )}
 
@@ -746,6 +903,12 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                     {sheet.plan.teacherName}
                     {groupFilter && groupFilter !== 'All' ? ` · ${groupFilter}` : ''}
                   </p>
+                  {!sheet.studentTracker && (
+                    <p className="mt-2 text-xs font-medium text-slate-800">
+                      Student Name:{' '}
+                      <span className="inline-block w-52 border-b-[1.5px] border-dotted border-slate-700 align-bottom" />
+                    </p>
+                  )}
 
                   <div className="mt-4 sm:mt-0 sm:absolute sm:right-0 sm:top-0 flex flex-col items-center rounded-lg border border-slate-900 bg-white p-1.5 text-center">
                     <QRCodeSVG
@@ -761,7 +924,11 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                   </div>
                 </header>
 
-                {/* Week 1 / Week 2 Simplistic 3-Column Tables */}
+                <p className="mb-3 text-center text-[11px] font-medium text-slate-700">
+                  Tick each box once revised · Ask a parent to sign on the dotted line each day
+                </p>
+
+                {/* Week 1 / Week 2 Kid-Friendly 4-Column Tables with Tickbox & Daily Parent Sign */}
                 <div className="space-y-6">
                   {weeks.map((week) => (
                     <section key={week.weekNumber} className="print-avoid-break space-y-2.5">
@@ -779,26 +946,36 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                               printColorAdjust: 'exact',
                             }}
                           >
-                            <th className="w-40 border border-slate-950 px-3 py-2 font-bold uppercase">
+                            <th className="w-32 border border-slate-950 px-2.5 py-2 font-bold uppercase">
                               TARGET DATE
                             </th>
-                            <th className="w-40 border border-slate-950 px-3 py-2 font-bold uppercase">
+                            <th className="w-36 border border-slate-950 px-2.5 py-2 font-bold uppercase">
                               SUBJECT
                             </th>
-                            <th className="border border-slate-950 px-3 py-2 font-bold uppercase">
+                            <th className="border border-slate-950 px-2.5 py-2 font-bold uppercase">
                               TARGET
+                            </th>
+                            <th className="w-32 border border-slate-950 px-2.5 py-2 font-bold uppercase text-center">
+                              PARENT SIGN
                             </th>
                           </tr>
                         </thead>
                         <tbody>
                           {week.days.map((day, dayIdx) => {
-                            const dayTasks = day.tasks.filter(
-                              (t) =>
+                            const dayTasks = day.tasks.filter((t) => {
+                              if (t.studentTrackerId) {
+                                return Boolean(
+                                  sheet.studentTracker &&
+                                    t.studentTrackerId === sheet.studentTracker.id
+                                );
+                              }
+                              return (
                                 !groupFilter ||
                                 groupFilter === 'All' ||
                                 !t.group ||
                                 t.group === groupFilter
-                            );
+                              );
+                            });
                             const isAlt = dayIdx % 2 === 1;
                             const rowBgColor = isAlt ? tint.evenRowBg : '#FFFFFF';
                             const dateBgColor = isAlt ? tint.evenDateBg : tint.oddDateBg;
@@ -813,21 +990,43 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                               printColorAdjust: 'exact' as const,
                             };
 
+                            const parentSignCell = (rowSpan: number) => (
+                              <td
+                                rowSpan={rowSpan}
+                                className="border border-slate-950 px-2.5 py-2 align-bottom text-center"
+                                style={cellStyle}
+                              >
+                                <div className="flex min-h-[34px] flex-col justify-end">
+                                  <div className="w-full border-b-[1.5px] border-dotted border-slate-700" />
+                                  <span className="mt-0.5 text-[9px] font-medium text-slate-500">
+                                    Sign
+                                  </span>
+                                </div>
+                              </td>
+                            );
+
                             if (dayTasks.length === 0) {
                               return (
                                 <tr key={day.date} style={cellStyle}>
                                   <td
-                                    className="border border-slate-950 px-3 py-2 font-medium align-top"
+                                    className="border border-slate-950 px-2.5 py-2 font-medium align-top"
                                     style={dateStyle}
                                   >
                                     {formatOrdinalDate(day.date, { shortMonth: true })}
                                   </td>
-                                  <td className="border border-slate-950 px-3 py-2" style={cellStyle}>
+                                  <td className="border border-slate-950 px-2.5 py-2" style={cellStyle}>
                                     Revision
                                   </td>
-                                  <td className="border border-slate-950 px-3 py-2" style={cellStyle}>
-                                    Consolidate covered topics
+                                  <td className="border border-slate-950 px-2.5 py-2" style={cellStyle}>
+                                    <div className="flex items-start gap-2">
+                                      <span
+                                        aria-hidden="true"
+                                        className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
+                                      />
+                                      <span>Consolidate covered topics</span>
+                                    </div>
                                   </td>
+                                  {parentSignCell(1)}
                                 </tr>
                               );
                             }
@@ -837,24 +1036,31 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                                 {taskIdx === 0 && (
                                   <td
                                     rowSpan={dayTasks.length}
-                                    className="border border-slate-950 px-3 py-2 font-medium align-top"
+                                    className="border border-slate-950 px-2.5 py-2 font-medium align-top"
                                     style={dateStyle}
                                   >
                                     {formatOrdinalDate(day.date, { shortMonth: true })}
                                   </td>
                                 )}
                                 <td
-                                  className="border border-slate-950 px-3 py-2 font-medium align-top"
+                                  className="border border-slate-950 px-2.5 py-2 font-medium align-top"
                                   style={cellStyle}
                                 >
                                   {formatSubjectCell(task, sheet.plan)}
                                 </td>
                                 <td
-                                  className="border border-slate-950 px-3 py-2 align-top"
+                                  className="border border-slate-950 px-2.5 py-2 align-top"
                                   style={cellStyle}
                                 >
-                                  {task.detail}
+                                  <div className="flex items-start gap-2">
+                                    <span
+                                      aria-hidden="true"
+                                      className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
+                                    />
+                                    <span>{task.detail}</span>
+                                  </div>
                                 </td>
+                                {taskIdx === 0 && parentSignCell(dayTasks.length)}
                               </tr>
                             ));
                           })}
@@ -869,7 +1075,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                     Online tracker:{' '}
                     <span className="font-mono-tabular underline">{sheet.qrUrl}</span>
                   </span>
-                  <span>Scan QR to tick tasks on phone &amp; turn on daily push reminders.</span>
+                  <span>Scan QR to tick tasks on phone &amp; sign with parent surname.</span>
                 </footer>
               </article>
             );
@@ -976,7 +1182,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                     {includeWeekends ? 'Days' : 'Weekdays'})
                   </h3>
                   <span className="text-[10px] text-slate-600">
-                    Tick each box once revised · Guardian initial daily
+                    Tick each box once revised · Parent signs on the dotted line daily
                   </span>
                 </div>
 
@@ -987,17 +1193,26 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                       <th className="border border-slate-900 px-2.5 py-1.5 font-bold">
                         Daily Revision Tasks
                       </th>
-                      <th className="w-28 border border-slate-900 px-2.5 py-1.5 font-bold text-center">
-                        Guardian Sign
+                      <th className="w-32 border border-slate-900 px-2.5 py-1.5 font-bold text-center">
+                        Parent Sign
                       </th>
                     </tr>
                   </thead>
                   <tbody>
                     {visibleDays.map((day, idx) => {
-                      const dayTasks = day.tasks.filter(
-                        (t) =>
-                          !groupFilter || groupFilter === 'All' || !t.group || t.group === groupFilter
-                      );
+                      const dayTasks = day.tasks.filter((t) => {
+                        if (t.studentTrackerId) {
+                          return Boolean(
+                            sheet.studentTracker && t.studentTrackerId === sheet.studentTracker.id
+                          );
+                        }
+                        return (
+                          !groupFilter ||
+                          groupFilter === 'All' ||
+                          !t.group ||
+                          t.group === groupFilter
+                        );
+                      });
                       const isAlt = idx % 2 === 1;
                       const rowBgColor = isAlt ? tint.evenRowBg : '#FFFFFF';
                       const dateBgColor = isAlt ? tint.evenDateBg : tint.oddDateBg;
@@ -1023,12 +1238,12 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                             </div>
                           </td>
                           <td className="border border-slate-900 px-2.5 py-2" style={cellStyle}>
-                            <ul className="space-y-1">
+                            <ul className="space-y-1.5">
                               {dayTasks.map((task) => (
                                 <li key={task.id} className="flex items-start gap-2 leading-snug">
                                   <span
                                     aria-hidden="true"
-                                    className="mt-0.5 inline-block h-3.5 w-3.5 shrink-0 border border-slate-950 bg-white"
+                                    className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
                                   />
                                   <span>
                                     <strong className="text-slate-950">{task.title}:</strong>{' '}
@@ -1039,10 +1254,15 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                             </ul>
                           </td>
                           <td
-                            className="border border-slate-900 px-2.5 py-2 text-center text-[10px] text-slate-400"
+                            className="border border-slate-900 px-2.5 py-2 align-bottom text-center"
                             style={cellStyle}
                           >
-                            &nbsp;
+                            <div className="flex min-h-[36px] flex-col justify-end">
+                              <div className="w-full border-b-[1.5px] border-dotted border-slate-700" />
+                              <span className="mt-0.5 text-[9px] font-medium text-slate-500">
+                                Sign
+                              </span>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1056,7 +1276,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                   Online tracker link:{' '}
                   <span className="font-mono-tabular underline">{sheet.qrUrl}</span>
                 </span>
-                <span>Scan QR to check off tasks on your phone &amp; turn on daily push reminders.</span>
+                <span>Scan QR to check off tasks on your phone &amp; sign with parent surname.</span>
               </footer>
             </article>
           );

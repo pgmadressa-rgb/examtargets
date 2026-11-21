@@ -3,9 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { BookmarkCheck, FolderOpen, Printer, Trash2, X } from 'lucide-react';
-import { AdminReport } from './components/AdminReport.tsx';
 import {
   addClassPlan,
   clearActiveTerm,
@@ -20,13 +19,23 @@ import {
   uploadCsvPlans,
 } from './components/ApiClient.ts';
 import type { AppStateResponse } from './components/ApiClient.ts';
-import { CsvUploadView } from './components/CsvUploadView.tsx';
-import { DayByDayPlanner } from './components/DayByDayPlanner.tsx';
 import { MobileQrTracker } from './components/MobileQrTracker.tsx';
 import { OfflineIndicator } from './components/OfflineIndicator.tsx';
-import { PrintStudio } from './components/PrintStudio.tsx';
 import { PWAInstallButton } from './components/PWAInstallButton.tsx';
 import { DEFAULT_DATE_RANGE } from './shared/planEngine.ts';
+
+const AdminReport = lazy(() =>
+  import('./components/AdminReport.tsx').then((m) => ({ default: m.AdminReport }))
+);
+const DayByDayPlanner = lazy(() =>
+  import('./components/DayByDayPlanner.tsx').then((m) => ({ default: m.DayByDayPlanner }))
+);
+const PrintStudio = lazy(() =>
+  import('./components/PrintStudio.tsx').then((m) => ({ default: m.PrintStudio }))
+);
+const CsvUploadView = lazy(() =>
+  import('./components/CsvUploadView.tsx').then((m) => ({ default: m.CsvUploadView }))
+);
 import type { ClassPlan, DateRange, TermSummary, TrackerSummary } from './shared/types.ts';
 
 type AdminTab = 'report' | 'planner' | 'print' | 'upload';
@@ -48,6 +57,7 @@ function readQrRouteFromUrl(): QrRoute | null {
 
 export default function App() {
   const [qrRoute, setQrRoute] = useState<QrRoute | null>(() => readQrRouteFromUrl());
+  const [isAdminQrPreview, setIsAdminQrPreview] = useState(false);
   const [activeTab, setActiveTab] = useState<AdminTab>('report');
 
   const [activeTermName, setActiveTermName] = useState('December 2026 Exams');
@@ -58,7 +68,7 @@ export default function App() {
   const [skippedNonNovCount, setSkippedNonNovCount] = useState(0);
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [includeWeekends, setIncludeWeekends] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => readQrRouteFromUrl() === null);
   const [error, setError] = useState<string | null>(null);
 
   // Term Modal State
@@ -94,12 +104,19 @@ export default function App() {
   }, [applyAppState]);
 
   useEffect(() => {
-    void loadState();
-  }, [loadState]);
+    // Strictly avoid fetching admin state or other classes when loaded from a QR link
+    if (!qrRoute) {
+      void loadState();
+    }
+  }, [qrRoute, loadState]);
 
   useEffect(() => {
     const onPopState = () => {
-      setQrRoute(readQrRouteFromUrl());
+      const next = readQrRouteFromUrl();
+      setQrRoute(next);
+      if (!next) {
+        setIsAdminQrPreview(false);
+      }
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -110,11 +127,13 @@ export default function App() {
       ? `/?tracker=${encodeURIComponent(trackerId)}`
       : `/?track=${encodeURIComponent(slug)}`;
     window.history.pushState({}, '', url);
+    setIsAdminQrPreview(true);
     setQrRoute(trackerId ? { trackerId } : { slug });
   };
 
   const exitQrToAdmin = () => {
     window.history.pushState({}, '', '/');
+    setIsAdminQrPreview(false);
     setQrRoute(null);
     void loadState();
   };
@@ -177,8 +196,8 @@ export default function App() {
         <MobileQrTracker
           classSlug={qrRoute.slug}
           trackerId={qrRoute.trackerId}
-          onExitToAdmin={exitQrToAdmin}
-          onTrackerUpdated={() => void loadState()}
+          onExitToAdmin={isAdminQrPreview ? exitQrToAdmin : undefined}
+          onTrackerUpdated={isAdminQrPreview ? () => void loadState() : undefined}
         />
         <OfflineIndicator />
       </>
@@ -355,7 +374,14 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <>
+          <Suspense
+            fallback={
+              <div className="space-y-4">
+                <div className="h-24 rounded-xl bg-slate-200/70 animate-pulse" />
+                <div className="h-80 rounded-2xl bg-slate-200/70 animate-pulse" />
+              </div>
+            }
+          >
             {activeTab === 'report' && (
               <AdminReport
                 plans={plans}
@@ -381,11 +407,13 @@ export default function App() {
             {activeTab === 'planner' && (
               <DayByDayPlanner
                 plans={plans}
+                trackersSummary={trackersSummary}
                 globalDateRange={globalDateRange}
                 selectedPlanId={selectedPlanId}
                 onSelectPlanId={setSelectedPlanId}
                 includeWeekends={includeWeekends}
                 onToggleWeekends={setIncludeWeekends}
+                onRefreshState={loadState}
                 onUpdateGlobalDateRange={async (startDate, endDate, overwriteManual) => {
                   const res = await updateGlobalDateRange({
                     startDate,
@@ -424,6 +452,7 @@ export default function App() {
             {activeTab === 'print' && (
               <PrintStudio
                 plans={plans}
+                trackersSummary={trackersSummary}
                 activeTermName={activeTermName}
                 globalDateRange={globalDateRange}
                 selectedPlanId={selectedPlanId}
@@ -467,7 +496,7 @@ export default function App() {
                 }}
               />
             )}
-          </>
+          </Suspense>
         )}
       </main>
 
