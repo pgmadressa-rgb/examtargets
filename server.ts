@@ -14,6 +14,7 @@ import {
   detectGroups,
   generateDailySchedule,
   parseMadrasahCsv,
+  resolvePlanDateRange,
   slugify,
 } from './src/shared/planEngine.ts';
 import type {
@@ -21,6 +22,7 @@ import type {
   DateRange,
   PushSubscriptionInfo,
   StudentTracker,
+  SyllabusNoteEntry,
   TermSnapshot,
   TermSummary,
   TrackerSummary,
@@ -171,12 +173,30 @@ function loadStore(): StoreData {
       const raw = JSON.parse(fs.readFileSync(STORE_PATH, 'utf-8')) as Partial<StoreData>;
       if (Array.isArray(raw.plans)) {
         const loadedRange = raw.globalDateRange || { ...DEFAULT_DATE_RANGE };
-        const needsDec1Migration =
-          loadedRange.startDate === '2026-11-18' && loadedRange.endDate === '2026-12-01';
-        const effectiveRange = needsDec1Migration ? { ...DEFAULT_DATE_RANGE } : loadedRange;
+        const isLegacyDefaultRange =
+          (loadedRange.startDate === '2026-11-18' && loadedRange.endDate === '2026-12-01') ||
+          (loadedRange.startDate === '2026-12-01' && loadedRange.endDate === '2026-12-14');
+        const effectiveRange: DateRange = isLegacyDefaultRange
+          ? { ...DEFAULT_DATE_RANGE }
+          : {
+              startDate: loadedRange.startDate || DEFAULT_DATE_RANGE.startDate,
+              endDate: loadedRange.endDate || DEFAULT_DATE_RANGE.endDate,
+              quranEndDate:
+                loadedRange.quranEndDate ||
+                (loadedRange.startDate === DEFAULT_DATE_RANGE.startDate
+                  ? DEFAULT_DATE_RANGE.quranEndDate
+                  : loadedRange.endDate || DEFAULT_DATE_RANGE.endDate),
+            };
         const migratedPlans = raw.plans.map((p) => {
           if (p.manuallyEdited) return p;
-          const nextRange = needsDec1Migration ? { ...effectiveRange } : p.dateRange;
+          const baseRange: DateRange = isLegacyDefaultRange
+            ? effectiveRange
+            : {
+                startDate: p.dateRange?.startDate || effectiveRange.startDate,
+                endDate: p.dateRange?.endDate || effectiveRange.endDate,
+                quranEndDate: p.dateRange?.quranEndDate || effectiveRange.quranEndDate,
+              };
+          const nextRange = resolvePlanDateRange(p.trackType, p.targets, baseRange);
           return {
             ...p,
             dateRange: nextRange,
@@ -515,10 +535,16 @@ async function startServer(): Promise<void> {
       onlyNovember2026?: boolean;
       startDate?: string;
       endDate?: string;
+      quranEndDate?: string;
     };
     const dateRange: DateRange = {
       startDate: body.startDate || store.globalDateRange.startDate,
       endDate: body.endDate || store.globalDateRange.endDate,
+      quranEndDate:
+        body.quranEndDate ||
+        store.globalDateRange.quranEndDate ||
+        body.endDate ||
+        store.globalDateRange.endDate,
     };
     const opts = {
       onlyNovember2026: body.onlyNovember2026 ?? true,
@@ -540,8 +566,14 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    const prevSyllabusBySlug = new Map(
+      store.plans.filter((p) => p.syllabusNotes).map((p) => [p.slug, p.syllabusNotes])
+    );
     store.globalDateRange = dateRange;
-    store.plans = result.plans;
+    store.plans = result.plans.map((p) => {
+      const preserved = prevSyllabusBySlug.get(p.slug);
+      return preserved ? { ...p, syllabusNotes: preserved } : p;
+    });
     store.skippedNonNovCount = result.skippedCount;
     store.totalCsvRows = result.totalRows;
     saveStore();
@@ -605,7 +637,11 @@ async function startServer(): Promise<void> {
       },
     };
     const trackType = body.trackType || 'Quran/Panj Para';
-    const dateRange = body.dateRange || store.globalDateRange;
+    const dateRange = resolvePlanDateRange(
+      trackType,
+      targets,
+      body.dateRange || store.globalDateRange
+    );
     const groups = detectGroups(targets);
     const dailySchedule = generateDailySchedule(slug, trackType, targets, dateRange);
 
@@ -630,21 +666,31 @@ async function startServer(): Promise<void> {
   });
 
   app.put('/api/plans/date-range', (req, res) => {
-    const body = req.body as { startDate?: string; endDate?: string; overwriteManual?: boolean };
+    const body = req.body as {
+      startDate?: string;
+      endDate?: string;
+      quranEndDate?: string;
+      overwriteManual?: boolean;
+    };
     if (!body.startDate || !body.endDate) {
       res.status(400).json({ error: 'Both startDate and endDate are required.' });
       return;
     }
-    const newRange: DateRange = { startDate: body.startDate, endDate: body.endDate };
+    const newRange: DateRange = {
+      startDate: body.startDate,
+      endDate: body.endDate,
+      quranEndDate: body.quranEndDate || store.globalDateRange.quranEndDate || body.endDate,
+    };
     store.globalDateRange = newRange;
     store.plans = store.plans.map((plan) => {
       if (plan.manuallyEdited && !body.overwriteManual) {
         return plan;
       }
+      const planRange = resolvePlanDateRange(plan.trackType, plan.targets, newRange);
       return {
         ...plan,
-        dateRange: { ...newRange },
-        dailySchedule: generateDailySchedule(plan.slug, plan.trackType, plan.targets, newRange),
+        dateRange: planRange,
+        dailySchedule: generateDailySchedule(plan.slug, plan.trackType, plan.targets, planRange),
         manuallyEdited: false,
       };
     });
@@ -667,7 +713,10 @@ async function startServer(): Promise<void> {
 
     const nextTargets = body.targets ?? existing.targets;
     const nextTrack = body.trackType ?? existing.trackType;
-    const nextRange = body.dateRange ?? existing.dateRange;
+    const rawRange = body.dateRange ?? existing.dateRange;
+    const nextRange = body.regenerateFromTeacherInput
+      ? resolvePlanDateRange(nextTrack, nextTargets, rawRange)
+      : rawRange;
 
     const dailySchedule = body.regenerateFromTeacherInput
       ? generateDailySchedule(existing.slug, nextTrack, nextTargets, nextRange)
@@ -709,6 +758,111 @@ async function startServer(): Promise<void> {
     store.plans[idx] = updated;
     saveStore();
     res.json({ plan: updated, trackersSummary: buildTrackerSummaries() });
+  });
+
+  app.put('/api/plans/:id/syllabus-notes', (req, res) => {
+    const idx = store.plans.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Class plan not found.' });
+      return;
+    }
+    const existing = store.plans[idx];
+    const body = req.body as {
+      notes?: Record<
+        string,
+        { subject?: string; content?: string; sourceFile?: string; updatedAt?: string }
+      >;
+      replaceAll?: boolean;
+    };
+
+    const now = new Date().toISOString();
+    const nextNotes: Record<string, SyllabusNoteEntry> = body.replaceAll
+      ? {}
+      : { ...(existing.syllabusNotes ?? {}) };
+
+    if (body.notes && typeof body.notes === 'object') {
+      for (const [key, entry] of Object.entries(body.notes)) {
+        const subjectName = (entry?.subject || key).trim();
+        if (!subjectName) continue;
+        const content = (entry?.content || '').trim();
+        // Remove any prior key matching case-insensitively before setting or deleting
+        for (const existingKey of Object.keys(nextNotes)) {
+          if (existingKey.toLowerCase() === subjectName.toLowerCase()) {
+            delete nextNotes[existingKey];
+          }
+        }
+        if (content) {
+          nextNotes[subjectName] = {
+            subject: subjectName,
+            content,
+            ...(entry.sourceFile ? { sourceFile: entry.sourceFile } : {}),
+            updatedAt: entry.updatedAt || now,
+          };
+        }
+      }
+    }
+
+    const updated: ClassPlan = {
+      ...existing,
+      syllabusNotes: nextNotes,
+    };
+    store.plans[idx] = updated;
+    saveStore();
+    res.json({ plan: updated, trackersSummary: buildTrackerSummaries() });
+  });
+
+  app.post('/api/syllabus-notes/bulk', (req, res) => {
+    const body = req.body as {
+      items?: Array<{
+        classPlanId?: string;
+        subject?: string;
+        content?: string;
+        sourceFile?: string;
+      }>;
+    };
+    if (!Array.isArray(body.items) || body.items.length === 0) {
+      res.status(400).json({ error: 'At least one syllabus note entry is required.' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    let updatedCount = 0;
+
+    for (const item of body.items) {
+      if (!item.classPlanId || !item.subject?.trim()) continue;
+      const planIdx = store.plans.findIndex((p) => p.id === item.classPlanId);
+      if (planIdx === -1) continue;
+
+      const plan = store.plans[planIdx];
+      const nextNotes: Record<string, SyllabusNoteEntry> = { ...(plan.syllabusNotes ?? {}) };
+      const subjectName = item.subject.trim();
+      const content = (item.content || '').trim();
+
+      for (const existingKey of Object.keys(nextNotes)) {
+        if (existingKey.toLowerCase() === subjectName.toLowerCase()) {
+          delete nextNotes[existingKey];
+        }
+      }
+
+      if (content) {
+        nextNotes[subjectName] = {
+          subject: subjectName,
+          content,
+          ...(item.sourceFile ? { sourceFile: item.sourceFile } : {}),
+          updatedAt: now,
+        };
+      }
+
+      store.plans[planIdx] = { ...plan, syllabusNotes: nextNotes };
+      updatedCount++;
+    }
+
+    saveStore();
+    res.json({
+      updatedCount,
+      plans: store.plans,
+      trackersSummary: buildTrackerSummaries(),
+    });
   });
 
   app.delete('/api/plans/:id', (req, res) => {

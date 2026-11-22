@@ -28,6 +28,7 @@ export async function uploadCsvPlans(payload: {
   onlyNovember2026: boolean;
   startDate: string;
   endDate: string;
+  quranEndDate?: string;
 }) {
   const res = await fetch('/api/plans/upload-csv', {
     method: 'POST',
@@ -89,6 +90,7 @@ export async function clearActiveTerm() {
 export async function updateGlobalDateRange(payload: {
   startDate: string;
   endDate: string;
+  quranEndDate?: string;
   overwriteManual: boolean;
 }) {
   const res = await fetch('/api/plans/date-range', {
@@ -132,6 +134,51 @@ export async function addClassPlan(payload: Partial<ClassPlan>) {
   if (!res.ok) throw new Error(data.error || 'Failed to add class plan.');
   return data as {
     plan: ClassPlan;
+    trackersSummary: Record<string, TrackerSummary>;
+  };
+}
+
+export async function savePlanSyllabusNotes(
+  id: string,
+  payload: {
+    notes: Record<
+      string,
+      { subject?: string; content: string; sourceFile?: string; updatedAt?: string }
+    >;
+    replaceAll?: boolean;
+  }
+) {
+  const res = await fetch(`/api/plans/${encodeURIComponent(id)}/syllabus-notes`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Failed to save syllabus notes.');
+  return data as {
+    plan: ClassPlan;
+    trackersSummary: Record<string, TrackerSummary>;
+  };
+}
+
+export async function bulkSaveSyllabusNotes(
+  items: Array<{
+    classPlanId: string;
+    subject: string;
+    content: string;
+    sourceFile?: string;
+  }>
+) {
+  const res = await fetch('/api/syllabus-notes/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Failed to import syllabus notes.');
+  return data as {
+    updatedCount: number;
+    plans: ClassPlan[];
     trackersSummary: Record<string, TrackerSummary>;
   };
 }

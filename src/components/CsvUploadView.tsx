@@ -11,6 +11,7 @@ interface CsvUploadViewProps {
     onlyNovember2026: boolean;
     startDate: string;
     endDate: string;
+    quranEndDate?: string;
   }) => Promise<{ importedCount: number; skippedCount: number }>;
   onResetDefault: () => Promise<void>;
 }
@@ -27,22 +28,26 @@ export const CsvUploadView: React.FC<CsvUploadViewProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [onlyNov, setOnlyNov] = useState(true);
   const [startDate, setStartDate] = useState(globalDateRange.startDate);
+  const [quranEndDate, setQuranEndDate] = useState(
+    globalDateRange.quranEndDate || globalDateRange.endDate
+  );
   const [endDate, setEndDate] = useState(globalDateRange.endDate);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   useEffect(() => {
     setStartDate(globalDateRange.startDate);
+    setQuranEndDate(globalDateRange.quranEndDate || globalDateRange.endDate);
     setEndDate(globalDateRange.endDate);
-  }, [globalDateRange.startDate, globalDateRange.endDate]);
+  }, [globalDateRange.startDate, globalDateRange.quranEndDate, globalDateRange.endDate]);
 
   const preview = useMemo(() => {
     if (!csvText.trim()) return null;
     return parseMadrasahCsv(csvText, {
       onlyNovember2026: onlyNov,
-      dateRange: { startDate, endDate },
+      dateRange: { startDate, endDate, quranEndDate },
     });
-  }, [csvText, onlyNov, startDate, endDate]);
+  }, [csvText, onlyNov, startDate, quranEndDate, endDate]);
 
   const multiClassTeachers = useMemo(() => {
     if (!preview) return [];
@@ -101,6 +106,7 @@ export const CsvUploadView: React.FC<CsvUploadViewProps> = ({
         onlyNovember2026: onlyNov,
         startDate,
         endDate,
+        quranEndDate,
       });
       setFeedback({
         type: 'ok',
@@ -240,20 +246,43 @@ export const CsvUploadView: React.FC<CsvUploadViewProps> = ({
                 Filter strictly to November 2026 rows
               </label>
 
-              <div className="flex items-center gap-2 text-xs">
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  className="rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono-tabular"
-                />
-                <span>to</span>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  className="rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono-tabular"
-                />
+              <div className="flex flex-wrap items-end gap-2.5 text-xs">
+                <div>
+                  <label htmlFor="csv-start-date" className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Start Date
+                  </label>
+                  <input
+                    id="csv-start-date"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="min-h-[36px] rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono-tabular"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="csv-quran-end-date" className="block text-[11px] font-medium text-slate-600 mb-1">
+                    Quran / Surahs End
+                  </label>
+                  <input
+                    id="csv-quran-end-date"
+                    type="date"
+                    value={quranEndDate}
+                    onChange={(e) => setQuranEndDate(e.target.value)}
+                    className="min-h-[36px] rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono-tabular"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="csv-is-end-date" className="block text-[11px] font-medium text-slate-600 mb-1">
+                    IS / Duas End
+                  </label>
+                  <input
+                    id="csv-is-end-date"
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="min-h-[36px] rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono-tabular"
+                  />
+                </div>
               </div>
             </div>
 

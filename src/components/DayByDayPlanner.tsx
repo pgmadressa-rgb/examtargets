@@ -37,6 +37,7 @@ interface DayByDayPlannerProps {
   onUpdateGlobalDateRange: (
     startDate: string,
     endDate: string,
+    quranEndDate: string,
     overwriteManual: boolean
   ) => Promise<void>;
   onSavePlan: (
@@ -70,6 +71,9 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
   onDeletePlan,
 }) => {
   const [startInput, setStartInput] = useState(globalDateRange.startDate);
+  const [quranEndInput, setQuranEndInput] = useState(
+    globalDateRange.quranEndDate || globalDateRange.endDate
+  );
   const [endInput, setEndInput] = useState(globalDateRange.endDate);
   const [overwriteManual, setOverwriteManual] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -87,8 +91,9 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
 
   useEffect(() => {
     setStartInput(globalDateRange.startDate);
+    setQuranEndInput(globalDateRange.quranEndDate || globalDateRange.endDate);
     setEndInput(globalDateRange.endDate);
-  }, [globalDateRange.startDate, globalDateRange.endDate]);
+  }, [globalDateRange.startDate, globalDateRange.quranEndDate, globalDateRange.endDate]);
 
   const selectedPlan = useMemo(
     () => plans.find((p) => p.id === selectedPlanId) ?? plans[0] ?? null,
@@ -153,7 +158,7 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
     setBusy(true);
     setStatusMessage(null);
     try {
-      await onUpdateGlobalDateRange(startInput, endInput, overwriteManual);
+      await onUpdateGlobalDateRange(startInput, endInput, quranEndInput, overwriteManual);
       setDraftDays(null);
       setStatusMessage('Updated revision date range across active term plans.');
     } catch (err) {
@@ -346,7 +351,7 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
     setStatusMessage(null);
     try {
       await onSavePlan(selectedPlan.id, {
-        dateRange: { startDate: startInput, endDate: endInput },
+        dateRange: { startDate: startInput, endDate: endInput, quranEndDate: quranEndInput },
         regenerateFromTeacherInput: true,
       });
       setDraftDays(null);
@@ -369,7 +374,7 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
         teacherName: newTeacher.trim(),
         className: newClass.trim(),
         trackType: newTrack,
-        dateRange: { startDate: startInput, endDate: endInput },
+        dateRange: { startDate: startInput, endDate: endInput, quranEndDate: quranEndInput },
         targets: {
           quranOrQaidah: newQuranTarget.trim() || 'NA',
           tajweedMakhraj: newTajweed.trim() || 'NA',
@@ -719,8 +724,23 @@ export const DayByDayPlanner: React.FC<DayByDayPlannerProps> = ({
               />
             </div>
             <div>
+              <label
+                htmlFor="rev-quran-end"
+                className="block text-xs font-medium text-slate-600 mb-1"
+              >
+                Quran &amp; Surahs End
+              </label>
+              <input
+                id="rev-quran-end"
+                type="date"
+                value={quranEndInput}
+                onChange={(e) => setQuranEndInput(e.target.value)}
+                className="min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-sm text-slate-900 font-mono-tabular focus:border-teal-700 focus:bg-white focus:outline-none"
+              />
+            </div>
+            <div>
               <label htmlFor="rev-end" className="block text-xs font-medium text-slate-600 mb-1">
-                Revision End Date
+                Islamic Studies &amp; Duas End
               </label>
               <input
                 id="rev-end"

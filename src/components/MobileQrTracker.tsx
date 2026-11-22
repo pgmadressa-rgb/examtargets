@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bell,
   BellRing,
+  BookOpen,
   Check,
   CheckCircle2,
   PenLine,
@@ -13,6 +14,7 @@ import {
   formatOrdinalDate,
   groupDaysIntoWeeks,
 } from '../shared/planEngine.ts';
+import { getSyllabusNotesList } from '../shared/syllabus.ts';
 import type { ClassPlan, RevisionTask, StudentTracker } from '../shared/types.ts';
 import {
   createOrGetStudentTracker,
@@ -75,8 +77,8 @@ export const MobileQrTracker: React.FC<MobileQrTrackerProps> = ({
   const [studentName, setStudentName] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('All');
 
-  // Active Day selection & Kid-friendly Weekly/Daily Views
-  const [trackerView, setTrackerView] = useState<'weekly' | 'daily'>('weekly');
+  // Active Day selection & Kid-friendly Weekly/Daily/Guide Views
+  const [trackerView, setTrackerView] = useState<'weekly' | 'daily' | 'guide'>('weekly');
   const [includeWeekends, setIncludeWeekends] = useState(false);
   const [activeDate, setActiveDate] = useState('');
   const [dayNote, setDayNote] = useState('');
@@ -243,6 +245,35 @@ export const MobileQrTracker: React.FC<MobileQrTrackerProps> = ({
     const sigs = tracker.parentSignaturesByDay ?? {};
     return visibleScheduleDays.filter((d) => Boolean(sigs[d.date]?.surname)).length;
   }, [tracker, visibleScheduleDays]);
+
+  const savedSyllabusNotes = useMemo(
+    () => (plan ? getSyllabusNotesList(plan) : []),
+    [plan]
+  );
+
+  const [guideReviewed, setGuideReviewed] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!tracker) return;
+    try {
+      const raw = localStorage.getItem(`maktab-guide-read-${tracker.id}`);
+      if (raw) setGuideReviewed(JSON.parse(raw) as Record<string, boolean>);
+    } catch {
+      // Ignore storage error
+    }
+  }, [tracker?.id]);
+
+  const toggleGuideReviewed = (subject: string) => {
+    if (!tracker) return;
+    setGuideReviewed((prev) => {
+      const next = { ...prev, [subject]: !prev[subject] };
+      try {
+        localStorage.setItem(`maktab-guide-read-${tracker.id}`, JSON.stringify(next));
+      } catch {
+        // Ignore storage error
+      }
+      return next;
+    });
+  };
 
   const overallProgress = useMemo(() => {
     if (!plan || !tracker) return { done: 0, total: 0, pct: 0 };
@@ -632,7 +663,7 @@ export const MobileQrTracker: React.FC<MobileQrTrackerProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
-            <div className="inline-flex rounded-xl bg-slate-100 p-1">
+            <div className="inline-flex flex-wrap rounded-xl bg-slate-100 p-1">
               <button
                 type="button"
                 onClick={() => setTrackerView('weekly')}
@@ -655,6 +686,20 @@ export const MobileQrTracker: React.FC<MobileQrTrackerProps> = ({
               >
                 Day-by-Day Cards
               </button>
+              {savedSyllabusNotes.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setTrackerView('guide')}
+                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-3.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
+                    trackerView === 'guide'
+                      ? 'bg-teal-700 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <BookOpen className="h-3.5 w-3.5" />
+                  Revision Guide ({savedSyllabusNotes.length})
+                </button>
+              )}
             </div>
 
             <label className="inline-flex min-h-[38px] items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer">
@@ -1084,6 +1129,70 @@ export const MobileQrTracker: React.FC<MobileQrTrackerProps> = ({
               </section>
             )}
           </>
+        )}
+
+        {/* MODE C: LINKED SUBJECT SYLLABUS REVISION GUIDE (THIS CLASS ONLY) */}
+        {trackerView === 'guide' && (
+          <section className="space-y-4">
+            <div className="rounded-3xl border border-slate-200 bg-white p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">
+                    {plan.className} · Subject Syllabus Guide
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Tap any subject card to mark its syllabus notes as reviewed.
+                  </p>
+                </div>
+                <span className="text-xs font-semibold text-teal-800 font-mono-tabular">
+                  {savedSyllabusNotes.filter((n) => guideReviewed[n.subject]).length} /{' '}
+                  {savedSyllabusNotes.length} reviewed
+                </span>
+              </div>
+
+              {savedSyllabusNotes.length === 0 ? (
+                <p className="text-xs text-slate-600">
+                  No syllabus notes have been published for {plan.className} yet.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {savedSyllabusNotes.map((entry) => {
+                    const reviewed = Boolean(guideReviewed[entry.subject]);
+                    return (
+                      <div
+                        key={entry.subject}
+                        className={`rounded-2xl border p-4 space-y-2 transition-colors ${
+                          reviewed
+                            ? 'border-emerald-200 bg-emerald-50/50'
+                            : 'border-slate-200 bg-slate-50/50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-bold text-slate-900">{entry.subject}</h3>
+                          <button
+                            type="button"
+                            onClick={() => toggleGuideReviewed(entry.subject)}
+                            aria-pressed={reviewed}
+                            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border px-3 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
+                              reviewed
+                                ? 'border-teal-700 bg-teal-700 text-white'
+                                : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                            }`}
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                            {reviewed ? 'Reviewed' : 'Mark Reviewed'}
+                          </button>
+                        </div>
+                        <p className="text-xs sm:text-[13px] leading-relaxed text-slate-800 whitespace-pre-line">
+                          {entry.content}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
         )}
 
         {/* Automated Daily Push Notification Settings */}

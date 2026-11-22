@@ -7,12 +7,14 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { BookmarkCheck, FolderOpen, Printer, Trash2, X } from 'lucide-react';
 import {
   addClassPlan,
+  bulkSaveSyllabusNotes,
   clearActiveTerm,
   deleteClassPlan,
   deleteTermSnapshot,
   fetchAppState,
   loadTermSnapshot,
   resetSeedPlans,
+  savePlanSyllabusNotes,
   saveTermSnapshot,
   updateClassPlan,
   updateGlobalDateRange,
@@ -68,6 +70,7 @@ export default function App() {
   const [skippedNonNovCount, setSkippedNonNovCount] = useState(0);
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [includeWeekends, setIncludeWeekends] = useState(false);
+  const [printSheetStyle, setPrintSheetStyle] = useState<'minimal' | 'detailed' | 'guide'>('minimal');
   const [loading, setLoading] = useState(() => readQrRouteFromUrl() === null);
   const [error, setError] = useState<string | null>(null);
 
@@ -293,7 +296,9 @@ export default function App() {
                 ·
               </span>
               <span className="text-slate-500 font-mono-tabular">
-                {plans.length} classes · Starts {globalDateRange.startDate}
+                {plans.length} classes · Start {globalDateRange.startDate} · Quran{' '}
+                {globalDateRange.quranEndDate || globalDateRange.endDate} · IS/Duas{' '}
+                {globalDateRange.endDate}
               </span>
               {savedTerms.length > 0 && (
                 <div className="flex items-center gap-1.5">
@@ -384,6 +389,7 @@ export default function App() {
           >
             {activeTab === 'report' && (
               <AdminReport
+                activeTermName={activeTermName}
                 plans={plans}
                 trackersSummary={trackersSummary}
                 globalDateRange={globalDateRange}
@@ -400,7 +406,23 @@ export default function App() {
                   setSelectedPlanId(id);
                   setActiveTab('print');
                 }}
+                onOpenDetailedGuide={(id) => {
+                  setSelectedPlanId(id);
+                  setPrintSheetStyle('guide');
+                  setActiveTab('print');
+                }}
                 onOpenQrPreview={openQrPreview}
+                onSaveClassNotes={async (planId, notes) => {
+                  const res = await savePlanSyllabusNotes(planId, { notes });
+                  setPlans((prev) => prev.map((p) => (p.id === planId ? res.plan : p)));
+                  setTrackersSummary(res.trackersSummary);
+                }}
+                onBulkSaveNotes={async (items) => {
+                  const res = await bulkSaveSyllabusNotes(items);
+                  setPlans(res.plans);
+                  setTrackersSummary(res.trackersSummary);
+                  return res.updatedCount;
+                }}
               />
             )}
 
@@ -414,10 +436,11 @@ export default function App() {
                 includeWeekends={includeWeekends}
                 onToggleWeekends={setIncludeWeekends}
                 onRefreshState={loadState}
-                onUpdateGlobalDateRange={async (startDate, endDate, overwriteManual) => {
+                onUpdateGlobalDateRange={async (startDate, endDate, quranEndDate, overwriteManual) => {
                   const res = await updateGlobalDateRange({
                     startDate,
                     endDate,
+                    quranEndDate,
                     overwriteManual,
                   });
                   setGlobalDateRange(res.globalDateRange);
@@ -459,6 +482,12 @@ export default function App() {
                 onSelectPlanId={setSelectedPlanId}
                 includeWeekends={includeWeekends}
                 onToggleWeekends={setIncludeWeekends}
+                sheetStyle={printSheetStyle}
+                onChangeSheetStyle={setPrintSheetStyle}
+                onOpenSyllabusInput={(id) => {
+                  setSelectedPlanId(id);
+                  setActiveTab('report');
+                }}
                 onOpenQrPreview={openQrPreview}
                 onTrackerCreated={loadState}
                 onSavePlan={async (id, payload) => {
@@ -466,10 +495,11 @@ export default function App() {
                   setPlans((prev) => prev.map((p) => (p.id === id ? res.plan : p)));
                   setTrackersSummary(res.trackersSummary);
                 }}
-                onUpdateGlobalDateRange={async (startDate, endDate, overwriteManual) => {
+                onUpdateGlobalDateRange={async (startDate, endDate, quranEndDate, overwriteManual) => {
                   const res = await updateGlobalDateRange({
                     startDate,
                     endDate,
+                    quranEndDate,
                     overwriteManual,
                   });
                   setGlobalDateRange(res.globalDateRange);
@@ -533,7 +563,9 @@ export default function App() {
               <p className="text-xs leading-relaxed text-slate-600">
                 Saves all <strong>{plans.length} classes</strong>, the{' '}
                 <span className="font-mono-tabular">
-                  {globalDateRange.startDate} → {globalDateRange.endDate}
+                  {globalDateRange.startDate} → Quran{' '}
+                  {globalDateRange.quranEndDate || globalDateRange.endDate} / IS{' '}
+                  {globalDateRange.endDate}
                 </span>{' '}
                 revision dates, and all synced student QR trackers into the server term archive.
               </p>

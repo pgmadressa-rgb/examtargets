@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   Calendar,
   ExternalLink,
   Printer,
@@ -16,9 +17,11 @@ import type {
   TrackType,
   TrackerSummary,
 } from '../shared/types.ts';
+import { SyllabusNotesPanel } from './SyllabusNotesPanel.tsx';
 import { TeacherClassSelector } from './TeacherClassSelector.tsx';
 
 interface AdminReportProps {
+  activeTermName: string;
   plans: ClassPlan[];
   trackersSummary: Record<string, TrackerSummary>;
   globalDateRange: DateRange;
@@ -29,7 +32,15 @@ interface AdminReportProps {
   onToggleWeekends: (next: boolean) => void;
   onOpenDayEditor: (planId: string) => void;
   onOpenPrintSheet: (planId: string) => void;
+  onOpenDetailedGuide: (planId: string) => void;
   onOpenQrPreview: (slug: string, trackerId?: string) => void;
+  onSaveClassNotes: (
+    planId: string,
+    notes: Record<string, { subject?: string; content: string; sourceFile?: string }>
+  ) => Promise<void>;
+  onBulkSaveNotes: (
+    items: Array<{ classPlanId: string; subject: string; content: string; sourceFile?: string }>
+  ) => Promise<number>;
 }
 
 const TRACK_FILTERS: Array<'All' | TrackType> = [
@@ -47,6 +58,7 @@ function formatShortDate(iso: string): string {
 }
 
 export const AdminReport: React.FC<AdminReportProps> = ({
+  activeTermName,
   plans,
   trackersSummary,
   globalDateRange,
@@ -57,7 +69,10 @@ export const AdminReport: React.FC<AdminReportProps> = ({
   onToggleWeekends,
   onOpenDayEditor,
   onOpenPrintSheet,
+  onOpenDetailedGuide,
   onOpenQrPreview,
+  onSaveClassNotes,
+  onBulkSaveNotes,
 }) => {
   const [search, setSearch] = useState('');
   const [trackFilter, setTrackFilter] = useState<'All' | TrackType>('All');
@@ -128,8 +143,10 @@ export const AdminReport: React.FC<AdminReportProps> = ({
               activeClasses.length
           )
         : 0;
-    const totalDays = plans[0]?.dailySchedule.length ?? 14;
-    return { totalTrackers, avgPct, totalDays };
+    const lengths = plans.map((p) => p.dailySchedule.length).filter((n) => n > 0);
+    const minDays = lengths.length > 0 ? Math.min(...lengths) : 16;
+    const maxDays = lengths.length > 0 ? Math.max(...lengths) : 18;
+    return { totalTrackers, avgPct, minDays, maxDays };
   }, [plans, trackersSummary]);
 
   const activeSummary = activePlan ? trackersSummary[activePlan.id] : undefined;
@@ -183,10 +200,14 @@ export const AdminReport: React.FC<AdminReportProps> = ({
           <div className="rounded-xl border border-slate-200 bg-white p-4">
             <div className="text-xs font-medium text-slate-500">Revision Window</div>
             <div className="mt-1.5 text-2xl font-bold text-slate-900 font-mono-tabular">
-              {stats.totalDays} Days
+              {stats.minDays === stats.maxDays
+                ? `${stats.maxDays} Days`
+                : `${stats.minDays}–${stats.maxDays} Days`}
             </div>
             <div className="mt-1 text-xs text-slate-500 font-mono-tabular">
-              {formatShortDate(globalDateRange.startDate)} – {formatShortDate(globalDateRange.endDate)}
+              {formatShortDate(globalDateRange.startDate)} · Quran{' '}
+              {formatShortDate(globalDateRange.quranEndDate || globalDateRange.endDate)} · IS{' '}
+              {formatShortDate(globalDateRange.endDate)}
             </div>
           </div>
 
@@ -390,6 +411,14 @@ export const AdminReport: React.FC<AdminReportProps> = ({
                 >
                   <QrCode className="h-3.5 w-3.5 text-teal-700" />
                   Open Parent QR View
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenDetailedGuide(activePlan.id)}
+                  className="inline-flex min-h-[40px] items-center gap-2 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                >
+                  <BookOpen className="h-3.5 w-3.5 text-teal-700" />
+                  Revision Guide
                 </button>
                 <button
                   type="button"
@@ -736,6 +765,18 @@ export const AdminReport: React.FC<AdminReportProps> = ({
             );
           })}
         </section>
+      )}
+      {/* Admin Syllabus Notes Repository (Text or Excel/Sheets per Subject & Class) */}
+      {plans.length > 0 && (
+        <SyllabusNotesPanel
+          activeTermName={activeTermName}
+          plans={plans}
+          activePlan={activePlan ?? plans.find((p) => p.id === selectedPlanId) ?? plans[0] ?? null}
+          onSelectPlanId={onSelectPlanId}
+          onSaveClassNotes={onSaveClassNotes}
+          onBulkSaveNotes={onBulkSaveNotes}
+          onOpenDetailedGuide={onOpenDetailedGuide}
+        />
       )}
     </div>
   );

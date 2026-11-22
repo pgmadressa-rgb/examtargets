@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Calendar, Check, ExternalLink, Printer, QrCode, UserCheck } from 'lucide-react';
+import { BookOpen, Calendar, Check, ExternalLink, Printer, QrCode, UserCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   formatOrdinalDate,
@@ -8,6 +8,10 @@ import {
   isMeaningful,
   normalizeTeacherKey,
 } from '../shared/planEngine.ts';
+import {
+  findLinkedSyllabusNote,
+  getSyllabusNotesList,
+} from '../shared/syllabus.ts';
 import type {
   ClassPlan,
   DateRange,
@@ -18,6 +22,8 @@ import type {
 import { createOrGetStudentTracker } from './ApiClient.ts';
 import { TeacherClassSelector } from './TeacherClassSelector.tsx';
 
+export type SheetStyle = 'minimal' | 'detailed' | 'guide';
+
 interface PrintStudioProps {
   plans: ClassPlan[];
   trackersSummary?: Record<string, TrackerSummary>;
@@ -27,6 +33,9 @@ interface PrintStudioProps {
   onSelectPlanId: (id: string) => void;
   includeWeekends: boolean;
   onToggleWeekends: (next: boolean) => void;
+  sheetStyle: SheetStyle;
+  onChangeSheetStyle: (style: SheetStyle) => void;
+  onOpenSyllabusInput: (planId: string) => void;
   onOpenQrPreview: (slug: string, trackerId?: string) => void;
   onTrackerCreated: () => Promise<void>;
   onSavePlan: (
@@ -36,6 +45,7 @@ interface PrintStudioProps {
   onUpdateGlobalDateRange: (
     startDate: string,
     endDate: string,
+    quranEndDate: string,
     overwriteManual: boolean
   ) => Promise<void>;
 }
@@ -114,7 +124,6 @@ function getExamSubjectList(plan: ClassPlan): Array<{ label: string; value: stri
 }
 
 type RowTintOption = 'slate' | 'teal' | 'stone';
-type SheetStyle = 'minimal' | 'detailed';
 type PrintScope = 'single' | 'teacher' | 'all';
 
 const ROW_TINT_CONFIG: Record<
@@ -159,6 +168,9 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   onSelectPlanId,
   includeWeekends,
   onToggleWeekends,
+  sheetStyle,
+  onChangeSheetStyle,
+  onOpenSyllabusInput,
   onOpenQrPreview,
   onTrackerCreated,
   onSavePlan,
@@ -166,8 +178,8 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
 }) => {
   const [scope, setScope] = useState<PrintScope>('single');
   const [qrMode, setQrMode] = useState<'class' | 'students'>('class');
-  const [sheetStyle, setSheetStyle] = useState<SheetStyle>('minimal');
   const [rowTint, setRowTint] = useState<RowTintOption>('slate');
+  const [excludedSubjects, setExcludedSubjects] = useState<Record<string, boolean>>({});
   const [studentNamesInput, setStudentNamesInput] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('All');
   const [generatedTrackers, setGeneratedTrackers] = useState<StudentTracker[]>([]);
@@ -187,6 +199,9 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   const [teacherNameDraft, setTeacherNameDraft] = useState(selectedPlan?.teacherName ?? '');
   const [classNameDraft, setClassNameDraft] = useState(selectedPlan?.className ?? '');
   const [startInput, setStartInput] = useState(globalDateRange.startDate);
+  const [quranEndInput, setQuranEndInput] = useState(
+    globalDateRange.quranEndDate || globalDateRange.endDate
+  );
   const [endInput, setEndInput] = useState(globalDateRange.endDate);
 
   useEffect(() => {
@@ -196,8 +211,9 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
 
   useEffect(() => {
     setStartInput(globalDateRange.startDate);
+    setQuranEndInput(globalDateRange.quranEndDate || globalDateRange.endDate);
     setEndInput(globalDateRange.endDate);
-  }, [globalDateRange.startDate, globalDateRange.endDate]);
+  }, [globalDateRange.startDate, globalDateRange.quranEndDate, globalDateRange.endDate]);
 
   const selectedTeacherGroup = useMemo(() => {
     if (!selectedPlan) return null;
@@ -319,12 +335,14 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
   };
 
   const handleApplyPrintDates = async () => {
-    if (!startInput || !endInput) return;
+    if (!startInput || !endInput || !quranEndInput) return;
     setBusy(true);
     setMessage(null);
     try {
-      await onUpdateGlobalDateRange(startInput, endInput, false);
-      setMessage(`Updated printout revision dates to ${startInput} – ${endInput}.`);
+      await onUpdateGlobalDateRange(startInput, endInput, quranEndInput, false);
+      setMessage(
+        `Updated printout dates: Start ${startInput} · Quran ${quranEndInput} · IS/Duas ${endInput}.`
+      );
     } catch (err) {
       setMessage((err as Error).message);
     } finally {
@@ -424,11 +442,11 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
             <div className="flex flex-wrap items-end gap-4">
               <div>
                 <span className="block text-xs font-medium text-slate-600 mb-1">Sheet Style</span>
-                <div className="inline-flex rounded-lg bg-slate-100 p-1">
+                <div className="inline-flex flex-wrap rounded-lg bg-slate-100 p-1">
                   <button
                     type="button"
                     aria-pressed={sheetStyle === 'minimal'}
-                    onClick={() => setSheetStyle('minimal')}
+                    onClick={() => onChangeSheetStyle('minimal')}
                     className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       sheetStyle === 'minimal'
                         ? 'bg-slate-900 text-white shadow-xs'
@@ -440,7 +458,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                   <button
                     type="button"
                     aria-pressed={sheetStyle === 'detailed'}
-                    onClick={() => setSheetStyle('detailed')}
+                    onClick={() => onChangeSheetStyle('detailed')}
                     className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                       sheetStyle === 'detailed'
                         ? 'bg-slate-900 text-white shadow-xs'
@@ -448,6 +466,18 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                     }`}
                   >
                     Detailed Targets Sheet
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={sheetStyle === 'guide'}
+                    onClick={() => onChangeSheetStyle('guide')}
+                    className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      sheetStyle === 'guide'
+                        ? 'bg-teal-700 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Detailed Revision Guide
                   </button>
                 </div>
               </div>
@@ -669,10 +699,25 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                 </div>
                 <div>
                   <label
+                    htmlFor="print-quran-end-date"
+                    className="block text-xs font-medium text-slate-600 mb-1"
+                  >
+                    Quran / Surahs End
+                  </label>
+                  <input
+                    id="print-quran-end-date"
+                    type="date"
+                    value={quranEndInput}
+                    onChange={(e) => setQuranEndInput(e.target.value)}
+                    className="min-h-[40px] rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-mono-tabular text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label
                     htmlFor="print-end-date"
                     className="block text-xs font-medium text-slate-600 mb-1"
                   >
-                    End Date
+                    IS / Duas End
                   </label>
                   <input
                     id="print-end-date"
@@ -687,6 +732,7 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                   disabled={
                     busy ||
                     (startInput === globalDateRange.startDate &&
+                      quranEndInput === (globalDateRange.quranEndDate || globalDateRange.endDate) &&
                       endInput === globalDateRange.endDate)
                   }
                   onClick={() => void handleApplyPrintDates()}
@@ -863,6 +909,64 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
             </div>
           )}
 
+          {/* Row 5: Linked Syllabus Notes Selector for Detailed Revision Guide */}
+          {selectedPlan && sheetStyle === 'guide' && (
+            <div className="border-t border-slate-100 pt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                  <BookOpen className="h-3.5 w-3.5 text-teal-700" />
+                  <span>
+                    Linked Syllabus Notes ({getSyllabusNotesList(selectedPlan).length} subjects saved
+                    for {selectedPlan.className})
+                  </span>
+                </div>
+                {getSyllabusNotesList(selectedPlan).length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    {getSyllabusNotesList(selectedPlan).map((entry) => {
+                      const key = `${selectedPlan.id}::${entry.subject}`;
+                      const checked = !excludedSubjects[key];
+                      return (
+                        <label
+                          key={entry.subject}
+                          className="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) =>
+                              setExcludedSubjects((prev) => ({
+                                ...prev,
+                                [key]: !e.target.checked,
+                              }))
+                            }
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-teal-700"
+                          />
+                          <span>{entry.subject}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">
+                    No syllabus notes saved for {selectedPlan.className} yet. Add text or upload
+                    an Excel/Sheets file in Admin Panel to link subject notes here.
+                  </p>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => onOpenSyllabusInput(selectedPlan.id)}
+                className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <BookOpen className="h-3.5 w-3.5 text-teal-700" />
+                {getSyllabusNotesList(selectedPlan).length > 0
+                  ? 'Edit Syllabus Notes'
+                  : 'Add Syllabus Notes'}
+              </button>
+            </div>
+          )}
+
           {message && <p className="text-xs font-medium text-teal-800">{message}</p>}
         </div>
       </section>
@@ -902,6 +1006,15 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                   <p className="mt-1.5 text-sm font-bold uppercase tracking-wide text-slate-950">
                     {sheet.plan.teacherName}
                     {groupFilter && groupFilter !== 'All' ? ` · ${groupFilter}` : ''}
+                  </p>
+                  <p className="mt-1 text-[11px] font-medium text-slate-700 font-mono-tabular">
+                    {formatPrintDate(sheet.plan.dateRange.startDate)} –{' '}
+                    {formatPrintDate(sheet.plan.dateRange.endDate)}
+                    {sheet.plan.trackType !== 'Islamic Studies Only' &&
+                    sheet.plan.dateRange.quranEndDate &&
+                    sheet.plan.dateRange.quranEndDate < sheet.plan.dateRange.endDate
+                      ? ` · Quran/Surahs end ${formatPrintDate(sheet.plan.dateRange.quranEndDate)}`
+                      : ''}
                   </p>
                   {!sheet.studentTracker && (
                     <p className="mt-2 text-xs font-medium text-slate-800">
@@ -1081,8 +1194,14 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
             );
           }
 
-          // Detailed Targets Sheet Mode
+          // Detailed Targets Sheet OR Detailed Revision Guide (with Linked Syllabus Notes)
           const examTargets = getExamSubjectList(sheet.plan);
+          const linkedNotes =
+            sheetStyle === 'guide'
+              ? getSyllabusNotesList(sheet.plan).filter(
+                  (entry) => !excludedSubjects[`${sheet.plan.id}::${entry.subject}`]
+                )
+              : [];
           const visibleDays = includeWeekends
             ? sheet.plan.dailySchedule
             : sheet.plan.dailySchedule.filter((d) => {
@@ -1099,7 +1218,9 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
               <header className="flex items-start justify-between gap-6 border-b-2 border-slate-900 pb-4">
                 <div className="space-y-1">
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">
-                    Exam Revision Handout · Parent &amp; Student Copy
+                    {sheetStyle === 'guide'
+                      ? `Detailed Revision Guide & Tracker · ${activeTermName || 'Exam Term'}`
+                      : 'Exam Revision Handout · Parent & Student Copy'}
                   </div>
                   <h2 className="text-2xl font-bold text-slate-950">
                     {sheet.plan.className}
@@ -1125,6 +1246,11 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                     <span className="font-mono-tabular">
                       <strong>Window:</strong> {formatPrintDate(sheet.plan.dateRange.startDate)} –{' '}
                       {formatPrintDate(sheet.plan.dateRange.endDate)}
+                      {sheet.plan.trackType !== 'Islamic Studies Only' &&
+                      sheet.plan.dateRange.quranEndDate &&
+                      sheet.plan.dateRange.quranEndDate < sheet.plan.dateRange.endDate
+                        ? ` · Quran/Surahs end ${formatPrintDate(sheet.plan.dateRange.quranEndDate)}`
+                        : ''}
                     </span>
                   </div>
                 </div>
@@ -1174,12 +1300,64 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                 </div>
               </section>
 
-              {/* Section 2: Day-by-Day Revision Tracker Table with Alternating Light Backgrounds */}
+              {/* Section 2 (Detailed Revision Guide Mode): Linked Syllabus Notes per Subject */}
+              {sheetStyle === 'guide' && (
+                <section className="mt-4 space-y-2">
+                  <div className="flex items-baseline justify-between">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                      2. Subject Syllabus Revision Guide ({linkedNotes.length} Subject
+                      {linkedNotes.length === 1 ? '' : 's'})
+                    </h3>
+                    <span className="text-[10px] text-slate-600">
+                      Tick each subject box once syllabus notes are reviewed
+                    </span>
+                  </div>
+
+                  {linkedNotes.length > 0 ? (
+                    <div className="border border-slate-900 divide-y divide-slate-900">
+                      {linkedNotes.map((entry, idx) => (
+                        <div
+                          key={entry.subject}
+                          className="print-avoid-break p-3 text-xs space-y-1.5"
+                          style={{
+                            backgroundColor: idx % 2 === 1 ? tint.evenRowBg : '#FFFFFF',
+                            WebkitPrintColorAdjust: 'exact',
+                            printColorAdjust: 'exact',
+                          }}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="font-bold text-slate-950 uppercase tracking-wide">
+                              {entry.subject}
+                            </div>
+                            <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-800">
+                              <span
+                                aria-hidden="true"
+                                className="inline-block h-3.5 w-3.5 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
+                              />
+                              <span>Notes Reviewed</span>
+                            </div>
+                          </div>
+                          <p className="text-slate-900 leading-relaxed whitespace-pre-line">
+                            {entry.content}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="border border-dashed border-slate-400 p-3 text-xs text-slate-600 no-print">
+                      No saved syllabus notes are linked for {sheet.plan.className} yet. Add text
+                      or upload an Excel/Sheets file in Admin Panel to populate this Revision Guide.
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* Section 2 or 3: Day-by-Day Revision Tracker Table with Alternating Light Backgrounds */}
               <section className="mt-4">
                 <div className="flex items-baseline justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
-                    2. Daily Revision Checklist ({visibleDays.length}{' '}
-                    {includeWeekends ? 'Days' : 'Weekdays'})
+                    {sheetStyle === 'guide' ? '3.' : '2.'} Daily Revision Checklist (
+                    {visibleDays.length} {includeWeekends ? 'Days' : 'Weekdays'})
                   </h3>
                   <span className="text-[10px] text-slate-600">
                     Tick each box once revised · Parent signs on the dotted line daily
@@ -1239,18 +1417,32 @@ export const PrintStudio: React.FC<PrintStudioProps> = ({
                           </td>
                           <td className="border border-slate-900 px-2.5 py-2" style={cellStyle}>
                             <ul className="space-y-1.5">
-                              {dayTasks.map((task) => (
-                                <li key={task.id} className="flex items-start gap-2 leading-snug">
-                                  <span
-                                    aria-hidden="true"
-                                    className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
-                                  />
-                                  <span>
-                                    <strong className="text-slate-950">{task.title}:</strong>{' '}
-                                    <span className="text-slate-800">{task.detail}</span>
-                                  </span>
-                                </li>
-                              ))}
+                              {dayTasks.map((task) => {
+                                const linkedNote =
+                                  sheetStyle === 'guide'
+                                    ? findLinkedSyllabusNote(sheet.plan, task.category, task.title)
+                                    : null;
+                                const isNoteLinked =
+                                  linkedNote &&
+                                  !excludedSubjects[`${sheet.plan.id}::${linkedNote.subject}`];
+                                return (
+                                  <li key={task.id} className="flex items-start gap-2 leading-snug">
+                                    <span
+                                      aria-hidden="true"
+                                      className="mt-0.5 inline-block h-4 w-4 shrink-0 rounded-[3px] border-[1.5px] border-slate-950 bg-white"
+                                    />
+                                    <span>
+                                      <strong className="text-slate-950">{task.title}:</strong>{' '}
+                                      <span className="text-slate-800">{task.detail}</span>
+                                      {isNoteLinked && (
+                                        <span className="ml-1.5 text-[10px] font-semibold text-teal-900">
+                                          (See {linkedNote.subject} Guide)
+                                        </span>
+                                      )}
+                                    </span>
+                                  </li>
+                                );
+                              })}
                             </ul>
                           </td>
                           <td

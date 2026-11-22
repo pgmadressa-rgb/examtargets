@@ -9,10 +9,47 @@ import type {
   TrackType,
 } from './types.ts';
 
+export const DEFAULT_QURAN_END_DATE = '2026-12-08';
+export const DEFAULT_ISLAMIC_END_DATE = '2026-12-10';
+
 export const DEFAULT_DATE_RANGE: DateRange = {
-  startDate: '2026-12-01',
-  endDate: '2026-12-14',
+  startDate: '2026-11-23',
+  endDate: DEFAULT_ISLAMIC_END_DATE,
+  quranEndDate: DEFAULT_QURAN_END_DATE,
 };
+
+export function hasIslamicOrDuaTopics(trackType: TrackType, targets: ClassTargets): boolean {
+  return (
+    trackType === 'Islamic Studies Only' ||
+    targets.islamicStudies.enabled ||
+    isMeaningful(targets.islamicStudies.duas)
+  );
+}
+
+export function resolvePlanDateRange(
+  trackType: TrackType,
+  targets: ClassTargets,
+  baseRange: DateRange = DEFAULT_DATE_RANGE
+): DateRange {
+  const startDate = baseRange.startDate || DEFAULT_DATE_RANGE.startDate;
+  const islamicEnd = baseRange.endDate || DEFAULT_ISLAMIC_END_DATE;
+  const rawQuranEnd = baseRange.quranEndDate || islamicEnd;
+  const quranEndDate = rawQuranEnd > islamicEnd ? islamicEnd : rawQuranEnd;
+
+  if (!hasIslamicOrDuaTopics(trackType, targets)) {
+    return {
+      startDate,
+      endDate: quranEndDate,
+      quranEndDate,
+    };
+  }
+
+  return {
+    startDate,
+    endDate: islamicEnd,
+    quranEndDate,
+  };
+}
 
 const EMPTY_VALUES = new Set(['', '.', '..', '...', 'na', 'n/a', 'none', 'nil', '-', '—', 'no']);
 
@@ -725,6 +762,17 @@ export function generateDailySchedule(
   const weekdaySlots = days.filter((d) => d.dow >= 1 && d.dow <= 5);
   const totalWorkdays = Math.max(1, weekdaySlots.length > 0 ? weekdaySlots.length : days.length);
 
+  const quranCutoffDate =
+    range.quranEndDate && range.quranEndDate < range.endDate
+      ? range.quranEndDate
+      : range.endDate;
+  const quranDays = days.filter((d) => d.date <= quranCutoffDate);
+  const quranWeekdaySlots = quranDays.filter((d) => d.dow >= 1 && d.dow <= 5);
+  const totalQuranWorkdays = Math.max(
+    1,
+    quranWeekdaySlots.length > 0 ? quranWeekdaySlots.length : Math.max(1, quranDays.length)
+  );
+
   // Assign continuous 0..totalWorkdays-1 indices to weekdays so Mon-Fri schedules never skip pages
   let runningWorkIdx = 0;
   const daySlotIndices = days.map((d, idx) => {
@@ -838,8 +886,11 @@ export function generateDailySchedule(
     const tasks: RevisionTask[] = [];
     let seq = 1;
 
-    // 1. Quran / Juzz 'Amma / Qaidah broken-down daily numbers
-    if (trackType !== 'Islamic Studies Only' && isMeaningful(targets.quranOrQaidah)) {
+    const includeQuranToday =
+      trackType !== 'Islamic Studies Only' && day.date <= quranCutoffDate;
+
+    // 1. Quran / Juzz 'Amma / Qaidah broken-down daily numbers (through quranCutoffDate e.g. 8 Dec)
+    if (includeQuranToday && isMeaningful(targets.quranOrQaidah)) {
       const qLower = targets.quranOrQaidah.toLowerCase();
       const label =
         trackType === 'Qaidah'
@@ -892,7 +943,7 @@ export function generateDailySchedule(
       } else if (qLower.includes('ma’idah') || qLower.includes('maidah')) {
         // Surah Al-Ma'idah (120 ayahs) + Al-An'am (1-41) = 161 ayahs
         const totalAyahs = 161;
-        const perDay = Math.ceil(totalAyahs / totalWorkdays);
+        const perDay = Math.ceil(totalAyahs / totalQuranWorkdays);
         const startA = (slotIdx * perDay) % totalAyahs;
         const endA = Math.min(totalAyahs - 1, startA + perDay - 1);
         if (endA < 120) {
@@ -903,7 +954,7 @@ export function generateDailySchedule(
           detail = `Al-Ma'idah ${startA + 1}–120 & Al-An'am 1–${endA - 120 + 1}`;
         }
       } else if (quranNums.length >= 2) {
-        const perDay = dailyQuranPages ?? Math.max(1, Math.ceil(quranNums.length / totalWorkdays));
+        const perDay = dailyQuranPages ?? Math.max(1, Math.ceil(quranNums.length / totalQuranWorkdays));
         const rawStart = Math.floor(slotIdx * perDay);
         const rawEnd = Math.max(rawStart, Math.floor((slotIdx + 1) * perDay) - 1);
         const span = Math.max(1, rawEnd - rawStart + 1);
@@ -934,7 +985,7 @@ export function generateDailySchedule(
           const perDay =
             dailyQuranPages && !/1\s*side/i.test(targets.quranDailyQuota)
               ? dailyQuranPages
-              : Math.max(2, Math.ceil(totalJuzPages / totalWorkdays));
+              : Math.max(2, Math.ceil(totalJuzPages / totalQuranWorkdays));
           detail = formatJuzPageSlice(juzRange.startJuz, juzRange.endJuz, slotIdx * perDay, perDay);
         }
       } else {
@@ -947,16 +998,16 @@ export function generateDailySchedule(
       tasks.push(makeTask(slug, day.dayIndex, seq++, 'quran', label, detail));
     }
 
-    // 2. Tajweed + Makhraj daily rule focus (pure rule name, no filler prose)
-    if (tajweedList.length > 0 && trackType !== 'Islamic Studies Only') {
+    // 2. Tajweed + Makhraj daily rule focus (pure rule name, through quranCutoffDate e.g. 8 Dec)
+    if (tajweedList.length > 0 && includeQuranToday) {
       const ruleA = tajweedList[slotIdx % tajweedList.length];
       const ruleB = tajweedList.length > 3 ? tajweedList[(slotIdx + 1) % tajweedList.length] : null;
       const focus = ruleB && ruleB !== ruleA ? `${ruleA} & ${ruleB}` : ruleA;
       tasks.push(makeTask(slug, day.dayIndex, seq++, 'tajweed', 'Tajweed & Makhraj', focus));
     }
 
-    // 3. Surahs broken down into daily numbers / Surah names
-    if (isMeaningful(targets.surahTargets) && trackType !== 'Islamic Studies Only') {
+    // 3. Surahs broken down into daily numbers / Surah names (through quranCutoffDate e.g. 8 Dec)
+    if (isMeaningful(targets.surahTargets) && includeQuranToday) {
       if (hasThursdayFridayKahf || hasWeekendSajdah) {
         const extraParts: string[] = ['Surah Al-Mulk · Surah Yaseen'];
         const juzSlice = expandedSurahs.length > 0
@@ -989,8 +1040,8 @@ export function generateDailySchedule(
         );
       } else if (expandedSurahs.length > 0) {
         const perDay = allSuratsEveryDay
-          ? Math.max(2, Math.ceil(expandedSurahs.length / totalWorkdays))
-          : dailySurahCount ?? Math.max(1, Math.ceil(expandedSurahs.length / totalWorkdays));
+          ? Math.max(2, Math.ceil(expandedSurahs.length / totalQuranWorkdays))
+          : dailySurahCount ?? Math.max(1, Math.ceil(expandedSurahs.length / totalQuranWorkdays));
         const startIdx = (slotIdx * perDay) % expandedSurahs.length;
         const slice = expandedSurahs.slice(startIdx, startIdx + perDay);
         const surahText =
@@ -1728,7 +1779,8 @@ export function parseMadrasahRows(
     usedSlugs.add(slug);
 
     const groups = detectGroups(params.targets);
-    const dailySchedule = generateDailySchedule(slug, params.trackType, params.targets, dateRange);
+    const planDateRange = resolvePlanDateRange(params.trackType, params.targets, dateRange);
+    const dailySchedule = generateDailySchedule(slug, params.trackType, params.targets, planDateRange);
 
     plans.push({
       id: `plan-${slug}`,
@@ -1740,7 +1792,7 @@ export function parseMadrasahRows(
       trackType: params.trackType,
       targets: params.targets,
       groups,
-      dateRange: { ...dateRange },
+      dateRange: planDateRange,
       dailySchedule,
       manuallyEdited: false,
     });

@@ -31,6 +31,7 @@ export interface RevisionDay {
 export interface DateRange {
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
+  quranEndDate?: string; // YYYY-MM-DD (Quran, Surahs, Tajweed, Qaidah cutoff)
 }
 
 export interface IslamicStudiesTargets {
@@ -56,6 +57,13 @@ export interface ClassTargets {
   extraNotes?: Array<{ label: string; value: string }>;
 }
 
+export interface SyllabusNoteEntry {
+  subject: string;
+  content: string;
+  sourceFile?: string;
+  updatedAt: string;
+}
+
 export interface ClassPlan {
   id: string;
   slug: string;
@@ -69,6 +77,7 @@ export interface ClassPlan {
   dateRange: DateRange;
   dailySchedule: RevisionDay[];
   manuallyEdited: boolean;
+  syllabusNotes?: Record<string, SyllabusNoteEntry>;
 }
 
 export interface ParentSignature {
